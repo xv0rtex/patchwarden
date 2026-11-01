@@ -1,0 +1,98 @@
+# Configuración del vigilante. Todo tiene valor por defecto; las variables de entorno
+# (TELEGRAM_TOKEN, ANTHROPIC_API_KEY, NVD_API_KEY…) tienen prioridad sobre este fichero.
+
+[general]
+nombre_web = "Web de ejemplo"
+intervalo_horas = 6          # NVD/OSV se consultan cada 6 h (los CVE nuevos salen a diario)
+
+[deteccion]
+docker = true                # lee /var/run/docker.sock (montado en solo lectura)
+contenedores = []            # vacío = los que tengan la etiqueta vigilante.vigilar=true
+exec_sondas = false          # true = ejecuta `php -v`, `nginx -v`… dentro para la versión exacta
+rutas_proyecto = ["/proyecto"]
+url_web = "http://nginx"               # p. ej. "http://nginx" para leer cabeceras Server / X-Powered-By
+
+[deteccion.manual]           # forzar versiones que no se puedan detectar
+# php = "8.2.10"
+# tomcat = "10.1.15"
+
+[fuentes]
+nvd = true
+osv = true
+kev = true
+epss = true
+fin_de_soporte = true
+
+[reglas]
+cvss_critico = 9.0           # CVSS >= 9 -> crítica
+epss_critico = 0.5           # o CVSS >= 7 con EPSS >= 50 %
+kev_es_critico = true        # o si CISA dice que se está explotando
+severidad_minima_aviso = "BAJA"
+ignorar = []                 # ["CVE-2023-xxxx"] falsos positivos revisados
+
+[avisos]
+consola = true
+webhook_formato = "generico" # generico | slack | discord
+recordatorio_horas = 24
+
+[mantenimiento]
+modo = "manual"              # off | manual (te pregunta con un enlace) | auto
+carpeta = "/mantenimiento"
+solo_kev_o_epss = true       # en auto: solo si además está explotada (KEV) o EPSS alto
+# comando = "/scripts/mantenimiento.sh"
+# webhook = "https://mi-balanceador/api/mantenimiento"
+
+[panel]
+activo = true
+puerto = 8080
+
+# ---------------------------------------------------------------------------------------
+# Corrección con Claude: proponer -> verificar en copia -> TÚ apruebas -> aplicar -> comprobar
+# ---------------------------------------------------------------------------------------
+[claude]
+modelo = "claude-opus-5-5"
+esfuerzo = "high"
+severidad_minima = "ALTA"    # a partir de qué severidad se prepara un plan de corrección
+max_planes_por_ciclo = 3
+investigar_web = true        # puede leer changelogs y guías de migración oficiales
+reintento_si_falla = true    # si la verificación falla, Claude corrige el plan una vez
+
+[verificacion]
+# Docker PARA PRUEBAS (VIGILANTE_DOCKER_PRUEBAS). Vacío = solo verificación estática.
+# docker_host y red vienen de VIGILANTE_DOCKER_PRUEBAS / VIGILANTE_RED_PRUEBAS (docker-compose.yml)    # red en la que se arrancan los contenedores de prueba
+conservar_copias = false
+
+[verificacion.herramientas]  # contenedores donde se ejecutan composer/npm… para regenerar los lock
+composer = "composer:2"
+npm = "node:22-alpine"
+
+# Pruebas de humo: cada servicio se construye/arranca en un contenedor de prueba con los cambios.
+[[verificacion.servicios]]
+nombre = "php"
+contexto = "web/app"         # carpeta con el Dockerfile (relativa a la raíz del proyecto)
+dockerfile = "Dockerfile"
+comandos_prueba = ["php -v", "php -l /var/www/html/index.php", "php /var/www/html/index.php"]
+espera_s = 30
+
+[[verificacion.servicios]]
+nombre = "nginx"
+compose = "docker-compose.yml"   # sin contexto: usa la imagen que diga el compose (ya modificado)
+hosts_extra = ["php:127.0.0.1"]  # para que nginx arranque sin el contenedor php
+comandos_prueba = ["nginx -t"]
+puerto_http = 80
+rutas = ["/robots.txt"]
+espera_s = 20
+[verificacion.servicios.subir]
+"web/nginx/default.conf" = "/etc/nginx/conf.d/default.conf"
+"web/app/public" = "/var/www/html"
+
+[aplicacion]
+# Solo se ejecuta tras tu aprobación explícita (panel o Telegram).
+# comando_despliegue = "docker compose --project-directory /ruta/web up -d --build --no-deps php nginx"
+# webhook_despliegue = "https://mi-ci/api/desplegar"
+# url_salud = "http://nginx:8081"
+rutas_salud = ["/", "/robots.txt"]
+espera_s = 120
+rollback_automatico = true   # si tras aplicar la web no responde bien, se restaura lo anterior
+git_commit = false           # si el proyecto es un repo git, hacer commit del cambio aplicado
+respaldo_imagenes = true     # etiqueta la imagen en marcha como vigilante-respaldo:<plan>-<contenedor>

@@ -1,0 +1,80 @@
+# Ejemplo: una web PHP + nginx con el vigilante al lado.
+# Arranque:  cp .env.ejemplo .env  (y rellena)  &&  docker compose up -d --build
+name: ejemplo
+
+services:
+  nginx:
+    image: nginx:1.25.3
+    ports: ["8000:80"]
+    volumes:
+      - ./web/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./web/app/public:/var/www/html:ro
+      - mantenimiento:/mantenimiento:ro          # <- lee la bandera del vigilante
+    labels: { vigilante.vigilar: "true" }
+    depends_on: [php]
+
+  php:
+    build: ./web/app                               # FROM php:8.1.2-fpm
+    volumes:
+      - ./web/app/public:/var/www/html:ro
+    labels: { vigilante.vigilar: "true" }
+
+  # Proxy del socket de Docker que SOLO deja listar/inspeccionar contenedores (detección).
+  # (Montar docker.sock directamente equivale a dar root sobre el host.)
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1      # GET /containers/*
+      POST: 0            # nada de crear/parar/borrar
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  # Proxy CON permisos de escritura: lo usan la verificación (construir y arrancar
+  # contenedores de prueba) y el despliegue de cambios APROBADOS. Es casi root sobre el host:
+  # quítalo si prefieres verificar en otro equipo (VIGILANTE_DOCKER_PRUEBAS=tcp://equipo-pruebas:2375)
+  # y desplegar con tu CI/CD ([aplicacion].webhook_despliegue).
+  docker-proxy-pruebas:
+    image: tecnativa/docker-socket-proxy:latest
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      BUILD: 1
+      EXEC: 1
+      NETWORKS: 1
+      VOLUMES: 1
+      POST: 1
+      DELETE: 1
+      ALLOW_START: 1
+      ALLOW_STOP: 1
+      ALLOW_RESTARTS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+
+  vigilante:
+    build: ../vigilante
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      VIGILANTE_NOMBRE_WEB: "Web de ejemplo"
+      VIGILANTE_URL_WEB: "http://nginx"
+      DOCKER_HOST: "tcp://docker-proxy:2375"                  # detección (solo lectura)
+      VIGILANTE_DOCKER_PRUEBAS: "tcp://docker-proxy-pruebas:2375"
+      VIGILANTE_RED_PRUEBAS: "ejemplo_default"
+      # El proyecto se monta en la MISMA ruta que en el host para que `docker compose`
+      # (lanzado desde el vigilante tras una aprobación) resuelva bien las rutas relativas.
+      VIGILANTE_RUTAS_PROYECTO: "${PWD}"
+      VIGILANTE_COMANDO_DESPLIEGUE: "docker -H tcp://docker-proxy-pruebas:2375 compose --project-directory ${PWD} up -d --build --no-deps php nginx"
+      VIGILANTE_URL_SALUD: "http://nginx:8081"                # puerto interno, salta el modo mantenimiento
+    depends_on: [docker-proxy, docker-proxy-pruebas]
+    volumes:
+      - ${PWD}:${PWD}                                         # lectura+escritura: solo se escribe al aplicar algo aprobado
+      - ./vigilante.toml:/config/vigilante.toml:ro
+      - mantenimiento:/mantenimiento                          # aquí escribe la bandera
+      - datos-vigilante:/datos                                # estado, caché, planes y copias de seguridad
+    ports: ["8080:8080"]                                      # panel
+
+volumes:
+  mantenimiento:
+  datos-vigilante:

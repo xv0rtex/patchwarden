@@ -1,0 +1,1 @@
+{ "name": "web-ejemplo-front", "private": true, "dependencies": { "axios": "^0.21.0", "lodash": "^4.17.15" } }

@@ -1,0 +1,8 @@
+{
+  "name": "diego/web-ejemplo",
+  "require": {
+    "php": "^8.1",
+    "guzzlehttp/guzzle": "^7.4",
+    "twig/twig": "^3.3"
+  }
+}

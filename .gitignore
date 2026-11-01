@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+.env
+vigilante-cve.zip
+.DS_Store
