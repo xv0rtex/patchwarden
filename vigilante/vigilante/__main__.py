@@ -41,13 +41,13 @@ def main():
     parar = threading.Event()
     signal.signal(signal.SIGTERM, lambda *_: parar.set())
     signal.signal(signal.SIGINT, lambda *_: parar.set())
-    intervalo = float(cfg["general"].get("intervalo_horas", 6)) * 3600
     while not parar.is_set():
         try:
             v.ciclo()
         except Exception:  # noqa: BLE001 - el servicio debe seguir vivo
             logging.exception("Error en el ciclo; se reintentará en el siguiente")
-        parar.wait(intervalo)
+        # se lee en cada vuelta: se puede cambiar desde Ajustes sin reiniciar
+        parar.wait(float(cfg["general"].get("intervalo_horas", 6)) * 3600)
 
 
 if __name__ == "__main__":

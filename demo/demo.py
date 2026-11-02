@@ -38,7 +38,8 @@ def preparar_datos():
     proyecto = os.path.join(TMP, "proyecto")
     for d in ("proyecto", "datos/planes", "datos/respaldos", "datos/pruebas", "mant"):
         shutil.rmtree(os.path.join(TMP, d), ignore_errors=True)
-    for f in ("datos/estado.json", "despliegues.log", "web_rota", "romper"):
+    # la cuenta se recrea con DEMO_USUARIO/DEMO_CLAVE y los ajustes vuelven a los de la demo en cada arranque
+    for f in ("datos/estado.json", "datos/cuenta.json", "datos/ajustes.json", "despliegues.log", "web_rota", "romper"):
         try:
             os.remove(os.path.join(TMP, f))
         except OSError:

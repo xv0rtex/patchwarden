@@ -57,6 +57,11 @@ def post_panel(ruta, datos):
     return ""
 
 
+def get_panel(ruta):
+    req = urllib.request.Request(f"http://127.0.0.1:{PUERTO_PANEL}{ruta}", headers={"X-Token": "secreto"})
+    return urllib.request.urlopen(req).read().decode()
+
+
 def leer(ruta):
     with open(os.path.join(PROYECTO, ruta)) as f:
         return f.read()
@@ -260,13 +265,13 @@ def main():
     ok("sin_cambios" in estados, "si Claude no propone cambios queda «sin_cambios» (sin verificar ni pedir decisión)")
 
     print("\n10) Panel")
-    html = urllib.request.urlopen(f"http://127.0.0.1:{PUERTO_PANEL}/plan/{php['id']}").read().decode()
+    html = get_panel(f"/plan/{php['id']}")
     ok("Por qué es correcto" in html and "Registro (auditoría)" in html and "Cambios en el código (verificados)" in html,
        "la página del plan muestra justificación, diffs, verificación y auditoría")
     with open(os.path.join(TMP, "plan_php.html"), "w") as f:
         f.write(html)
     with open(os.path.join(TMP, "plan_twig.html"), "w") as f:
-        f.write(urllib.request.urlopen(f"http://127.0.0.1:{PUERTO_PANEL}/plan/{twig['id']}").read().decode())
+        f.write(get_panel(f"/plan/{twig['id']}"))
     with open(os.path.join(TMP, "telegram.json"), "w") as f:
         json.dump([tg.mensajes[i] for i in tg.orden], f, ensure_ascii=False, indent=1)
     time.sleep(1)   # dejar terminar el re-escaneo lanzado tras aplicar/revertir

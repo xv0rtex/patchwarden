@@ -48,6 +48,9 @@ _I = {
     "punto": ['M12 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 1 0 0-3z'],
     "enviar": ['M4 12l16-7-6 16-3-7-7-2z'],
     "menos": ['M6 12h12'],
+    "ajustes": ['M4 7h9', 'M17 7h3', 'M15 5v4', 'M4 17h3', 'M11 17h9', 'M9 15v4'],
+    "salir": ['M14 4h5v16h-5', 'M10 8l-4 4 4 4', 'M6 12h10'],
+    "usuario": ['M12 4a4 4 0 1 0 0 8 4 4 0 1 0 0-8z', 'M4.5 20a7.5 7.5 0 0 1 15 0'],
 }
 
 
@@ -215,18 +218,18 @@ def leyenda_gravedad() -> str:
 # ------------------------------------------------------------------ página
 NAV = [("/", "Resumen", "resumen"), ("/vulnerabilidades", "Vulnerabilidades", "alerta"),
        ("/componentes", "Componentes", "caja"), ("/correcciones", "Correcciones", "llave"),
-       ("/mantenimiento", "Mantenimiento", "power")]
+       ("/mantenimiento", "Mantenimiento", "power"), ("/ajustes", "Ajustes", "ajustes")]
 
 
 def pagina(titulo: str, cuerpo: str, *, activo: str = "/", web: str = "", subtitulo: str = "",
            acciones: str = "", aviso: str = "", toast: str = "", badges: dict | None = None,
            extra_nav: list | None = None, refrescar: int = 0, dialogo_token: bool = False,
-           selector: str = "") -> str:
+           selector: str = "", usuario: str = "") -> str:
     badges = badges or {}
     nav = []
     for href, nombre, ic in NAV + (extra_nav or []):
         b = f'<span class="nb">{badges[href]}</span>' if badges.get(href) else ""
-        clase = "act" if href == activo else ""
+        clase = "act" if href == activo or (href != "/" and activo.startswith(href + "/")) else ""
         nav.append(f'<a class="{clase}" href="{href}">{icono(ic, 18)}<span>{E(nombre)}</span>{b}</a>')
     meta = f'<meta http-equiv="refresh" content="{refrescar}">' if refrescar else ""
     t = (f'<div class="toast" role="status">{icono("info", 18)}<span>{E(toast)}</span>'
@@ -241,7 +244,7 @@ def pagina(titulo: str, cuerpo: str, *, activo: str = "/", web: str = "", subtit
 <aside class="side"><a class="marca" href="/">{LOGO_SVG.format(t=30)}<span><b>Patchwarden</b><small>{E(web)}</small></span></a>
 <nav>{''.join(nav)}</nav>
 <button type="button" class="tema" id="tema" aria-label="Cambiar entre tema claro y oscuro">{icono("sol", 16, "t-sol")}{icono("luna", 16, "t-luna")}<span>Tema</span></button>
-<div class="side-pie">{icono("candado", 14)}<span>Nada se aplica sin tu aprobación</span></div></aside>
+{pie_usuario(usuario)}<div class="side-pie">{icono("candado", 14)}<span>Nada se aplica sin tu aprobación</span></div></aside>
 <div class="main">{aviso}
 <header class="top"><div><h1>{E(titulo)}</h1>{f'<p>{subtitulo}</p>' if subtitulo else ''}</div>
 <div class="top-x">{selector}{acciones}</div></header>
@@ -252,6 +255,27 @@ def pagina(titulo: str, cuerpo: str, *, activo: str = "/", web: str = "", subtit
 <div class="dlg-b"><button class="btn btn-secundario" value="no">Cancelar</button>
 <button class="btn btn-primario" value="si" id="dlg-ok">Confirmar</button></div></form></dialog>
 <script>{JS}</script></body></html>"""
+
+
+def pie_usuario(usuario: str) -> str:
+    if not usuario:
+        return ""
+    return (f'<div class="side-user">{icono("usuario", 16)}<span title="{E(usuario, quote=True)}">{E(usuario)}</span>'
+            f'<form method="post" action="/salir"><button class="salir" aria-label="Cerrar sesión" title="Cerrar sesión">'
+            f'{icono("salir", 16)}</button></form></div>')
+
+
+def pagina_acceso(titulo: str, cuerpo: str, error: str = "", nota: str = "") -> str:
+    """Página sin menú (entrar / crear la cuenta)."""
+    err = (f'<div class="banner banner-mal" role="alert">{icono("alerta", 18)}<div><p>{E(error)}</p></div></div>'
+           if error else "")
+    return f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script>try{{var t=localStorage.getItem("pw-tema");if(t)document.documentElement.dataset.theme=t}}catch(e){{}}</script>
+<title>{E(titulo)} · Patchwarden</title><link rel="icon" href="{FAVICON}"><style>{CSS}</style></head>
+<body><main class="acceso"><div class="acceso-c">
+<div class="acceso-m">{LOGO_SVG.format(t=40)}<b>Patchwarden</b></div>
+<h1>{E(titulo)}</h1>{f'<p class="muted">{nota}</p>' if nota else ''}{err}{cuerpo}</div></main></body></html>"""
 
 
 DLG_CLAUDE = ('<div id="dlg-claude" class="dlg-claude" hidden><div class="dlg-sel">'
@@ -555,6 +579,40 @@ background:rgba(38,56,77,.55);color:#fff;backdrop-filter:blur(4px)}.tg-k button:
 .tg-sep{text-align:center;margin:14px 0 4px}.tg-sep span{background:rgba(38,56,77,.45);color:#fff;border-radius:99px;
 padding:3px 11px;font-size:12px;font-weight:600}
 .tg-pie{background:#fff;padding:10px 14px;color:#8a94a6;font-size:13px;display:flex;gap:8px;align-items:center}
+
+/* --- acceso, usuario y ajustes --- */
+.side-user{display:flex;align-items:center;gap:8px;padding:8px 12px;margin-top:auto;border-top:1px solid var(--side-line);color:var(--side-ink);font-size:13px}
+.side-user span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.side-user form{margin:0}
+.salir{all:unset;cursor:pointer;display:grid;place-items:center;width:32px;height:32px;border-radius:8px;color:var(--side-muted)}
+.salir:hover{background:var(--side2);color:var(--on-solid)}.salir:focus-visible{outline:2px solid var(--side-acc)}
+.acceso{min-height:100vh;display:grid;place-items:center;padding:24px 16px;background:var(--bg)}
+.acceso-c{width:min(420px,100%);background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--sh);padding:32px}
+.acceso-m{display:flex;align-items:center;gap:12px;font-size:17px}.acceso h1{font-size:21px;margin:24px 0 8px}
+.acceso .banner{margin-top:16px;padding:12px}.acceso .banner p{margin:0}.acceso .btn{width:100%;margin-top:24px;padding:12px}
+.acceso .campo input{padding:11px 12px}.acceso code{font-family:var(--mono);font-size:12.5px}
+.banner-mal{background:var(--mal-bg);border-color:var(--mal-line);color:var(--mal-t)}
+.pestanas{display:flex;gap:4px;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.pestanas a{display:flex;align-items:center;gap:8px;padding:12px 16px;color:var(--ink2);font-weight:600;font-size:14px;
+border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;text-decoration:none!important}
+.pestanas a:hover{color:var(--ink)}.pestanas a[aria-current=page]{color:var(--acc);border-bottom-color:var(--acc)}
+.pestanas a:focus-visible{outline:2px solid var(--acc);outline-offset:-2px;border-radius:8px 8px 0 0}
+.ajustes-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:16px 24px}
+.ajustes-g .campo{margin-top:0}
+.form-estrecho{max-width:440px}.form-estrecho .campo:first-child{margin-top:0}
+.campo .ayuda{font-weight:400;color:var(--muted);font-size:12.5px}
+.campo input:disabled,.campo select:disabled{background:var(--neu-bg);color:var(--muted);cursor:not-allowed}
+.campo input:focus,.campo select:focus,.campo textarea:focus{outline:2px solid var(--acc);outline-offset:1px}
+.campo-bool{flex-direction:row;align-items:flex-start;gap:12px;font-weight:600}.campo-bool input{width:18px;height:18px;margin:1px 0 0;accent-color:var(--acc);flex:none}
+.campo-bool span{display:flex;flex-direction:column;gap:4px}
+.secreto{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.secreto input[type=password]{flex:1;min-width:0}
+.secreto label{display:flex;gap:6px;align-items:center;font-weight:400;font-size:12.5px;color:var(--muted)}
+.fijado{display:inline-flex;gap:6px;align-items:center;font-weight:400;font-size:12.5px;color:var(--av-t)}
+.form-pie{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:24px;padding-top:16px;border-top:1px solid var(--line2)}
+.prueba-canal{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.prueba-canal p{margin:0}
+.side-user+.side-pie{margin-top:0}
+@media (max-width:640px){.form-pie .btn{width:100%}.acceso-c{padding:24px}}
+@media (max-width:860px){.side-user{border:0;margin:0 0 0 auto;padding:0}.side-user span,.side-user>.ico{display:none}}
 """
 
 JS = r"""

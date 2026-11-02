@@ -3,25 +3,28 @@
 Páginas: resumen, vulnerabilidades, componentes, correcciones (planes de Claude), detalle de
 cada plan (aprobar / rechazar / aplicar / revertir) y modo mantenimiento.
 
-Acceso: contraseña opcional para todo el panel (HTTP Basic) y token para las acciones. Si hay
-contraseña, las acciones la aceptan en lugar del token siempre que la petición venga de la propia
-página (comprobación de origen contra CSRF).
+Acceso: cuenta única con login (usuarios.py). Sin cuenta, todo lleva a /configuracion-inicial,
+que pide el código de un solo uso del log. Cada formulario POST lleva el token CSRF de la sesión.
+[panel] token, si se configura, es un token de API para scripts (cabecera X-Token o campo «token»).
 """
 from __future__ import annotations
 
-import base64
 import datetime as dt
 import functools
 import hmac
+import ipaddress
 import json
 import logging
+import re
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import claude, consumo
+from . import claude, consumo, panel_ajustes
 from . import vista as V
+from .ajustes import Ajustes, ErrorAjuste
+from .usuarios import Cuenta, ErrorCuenta
 from .modelo import ORDEN_SEVERIDAD
 from .planes import aprobados, pendientes
 from .versiones import comparar
@@ -58,6 +61,22 @@ def estado_verificacion_cambio(plan, c) -> tuple[str, str]:
     return "No se pudo preparar en la copia", "mal"
 
 
+_FORM_POST = re.compile(r'(<form\b[^>]*\bmethod=["\']?post["\']?[^>]*>)', re.I)
+
+
+def con_csrf(html: str, csrf: str) -> str:
+    """Añade el token CSRF de la sesión a todos los formularios POST de la página."""
+    if not csrf:
+        return html
+    campo = f'<input type="hidden" name="csrf" value="{E(csrf, quote=True)}">'
+    return _FORM_POST.sub(lambda m: m.group(1) + campo, html)
+
+
+def volver_seguro(ruta: str) -> str:
+    """Solo rutas internas (evita redirecciones abiertas tras el login)."""
+    return ruta if ruta.startswith("/") and not ruta.startswith(("//", "/\\")) else "/"
+
+
 class LimiteIntentos:
     """Bloquea una IP unos minutos tras varios intentos de contraseña fallidos (el panel puede ser público)."""
 
@@ -88,6 +107,15 @@ class Panel:
     def __init__(self, vigilante):
         self.v = vigilante
         self.cfg = vigilante.cfg["panel"]
+        self.cuenta = Cuenta(vigilante.datos)
+        self.ajustes = Ajustes(vigilante.cfg, vigilante.datos)
+        if not self.cuenta.existe():
+            if self.cfg.get("usuario") and self.cfg.get("clave"):
+                # migración desde la contraseña HTTP Basic: la cuenta se crea con esas credenciales
+                self.cuenta.crear(self.cfg["usuario"], self.cfg["clave"], validar=False)
+            else:
+                log.warning("Panel sin cuenta: abre /configuracion-inicial y usa este código para crearla: %s",
+                            self.cuenta.codigo_inicial())
 
     def token_ok(self, token):
         esperado = self.cfg.get("token") or ""
@@ -136,7 +164,7 @@ class Panel:
         pendientes_n = sum(1 for p in planes if p["estado"] == "pendiente_aprobacion")
         criticas = sum(1 for h in hs_f if h["critico"])
         apps, selector = self._resumen_apps(), ""
-        if len(apps) > 1:
+        if len(apps) > 1 and not activo.startswith("/ajustes"):
             sel = ctx.get("app", "")
             ops = f'<option value="">Todas las apps ({len(apps)})</option>' + "".join(
                 f'<option value="{E(a, quote=True)}"{" selected" if a == sel else ""}>{E(a)} · {d["vulns"]} vuln.'
@@ -146,10 +174,12 @@ class Panel:
         if aviso:
             aviso = f'<div class="aviso-demo">{aviso}</div>'
         extra_nav = self.cfg.get("nav_extra") or []
-        return V.pagina(titulo, cuerpo, activo=activo, web=self.v.cfg["general"]["nombre_web"], aviso=aviso,
+        html = V.pagina(titulo, cuerpo, activo=activo, web=self.v.cfg["general"]["nombre_web"], aviso=aviso,
                         toast=ctx.get("msg", ""), badges={"/correcciones": pendientes_n,
                                                           "/vulnerabilidades": criticas},
-                        extra_nav=extra_nav, dialogo_token=ctx.get("pide_token", False), selector=selector, **kw)
+                        extra_nav=extra_nav, dialogo_token=False, selector=selector,
+                        usuario=ctx.get("usuario", ""), **kw)
+        return con_csrf(html, ctx.get("csrf", ""))
 
     def _form_resolver(self, campos: str, texto: str, etiqueta: str, consulta: dict, tamano_pequeno=True) -> str:
         """Formulario con ventana de confirmación: el usuario inicia EXPLÍCITAMENTE la resolución con Claude."""
@@ -1046,32 +1076,41 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
     panel = Panel(vigilante)
     cfg_panel = vigilante.cfg["panel"]
     host = host or cfg_panel.get("host") or "0.0.0.0"
-    usuario, clave = cfg_panel.get("usuario") or "", cfg_panel.get("clave") or ""
     limite = LimiteIntentos()
+    cuenta = panel.cuenta
 
     class Manejador(BaseHTTPRequestHandler):
         def log_message(self, fmt, *a):
             log.debug("panel: " + fmt, *a)
 
-        # -------- contraseña de acceso (HTTP Basic) para todo el panel, si está configurada
-        def _basic_ok(self) -> bool:
-            if not clave:
-                return False
-            cab = self.headers.get("Authorization") or ""
-            if not cab.startswith("Basic "):
-                return False
-            try:
-                u, _, c = base64.b64decode(cab[6:]).decode().partition(":")
-            except ValueError:
-                return False
-            return hmac.compare_digest(u, usuario) and hmac.compare_digest(c, clave)
-
         def _ip(self) -> str:
-            return self.headers.get("CF-Connecting-IP") or self.client_address[0]
+            # la cabecera del túnel/proxy solo se cree si la conexión viene de la propia red (el proxy);
+            # si no, cualquiera podría cambiarla en cada intento y saltarse el bloqueo
+            directa = self.client_address[0]
+            try:
+                local = ipaddress.ip_address(directa).is_private or ipaddress.ip_address(directa).is_loopback
+            except ValueError:
+                local = False
+            return (self.headers.get("CF-Connecting-IP") if local else None) or directa
 
-        def _exigir_acceso(self) -> bool:
-            if not clave:
-                return True
+        # -------- sesión (cookie) o token de API (scripts)
+        def _sid(self) -> str:
+            return _cookie(self.headers, "pw_sesion")
+
+        def _sesion(self) -> dict | None:
+            return cuenta.sesion(self._sid())
+
+        def _https(self) -> bool:
+            return (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" or \
+                '"https"' in (self.headers.get("CF-Visitor") or "")
+
+        def _cookie_sesion(self, sid: str, borrar=False) -> str:
+            seguro = "; Secure" if self._https() else ""
+            if borrar:
+                return f"pw_sesion=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{seguro}"
+            return f"pw_sesion={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{seguro}"
+
+        def _bloqueado(self) -> bool:
             espera = limite.restante(self._ip())
             if espera:
                 cuerpo = f"Demasiados intentos. Prueba de nuevo en {espera} s.".encode()
@@ -1080,34 +1119,45 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
                 self.send_header("Content-Length", str(len(cuerpo)))
                 self.end_headers()
                 self.wfile.write(cuerpo)
-                return False
-            if self._basic_ok():
-                limite.acierto(self._ip())
                 return True
-            if self.headers.get("Authorization"):       # credenciales dadas pero incorrectas
-                limite.fallo(self._ip())
-            cuerpo = b"Acceso restringido"
-            self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="Vigilante", charset="UTF-8"')
-            self.send_header("Content-Length", str(len(cuerpo)))
-            self.end_headers()
-            self.wfile.write(cuerpo)
             return False
 
-        def _mismo_origen(self) -> bool:
-            """Protección CSRF cuando la contraseña Basic sustituye al token."""
-            origen = self.headers.get("Origin") or self.headers.get("Referer") or ""
-            return bool(origen) and urllib.parse.urlparse(origen).netloc == self.headers.get("Host", "")
-
-        def _ctx(self, q=None):
+        def _ctx(self, q=None, ses=None):
             q = q or {}
-            pide_token = not clave and not panel.token_ok(_cookie(self.headers, "vigilante_token"))
             conocidas = panel._resumen_apps()
             app = urllib.parse.unquote(q["app"]) if "app" in q else urllib.parse.unquote(_cookie(self.headers, "vigilante_app"))
             app = app if app in conocidas else ""
             if "app" in q:
                 self._extra = [("Set-Cookie", f"vigilante_app={urllib.parse.quote(app)}; Path=/; SameSite=Strict; Max-Age=31536000")]
-            return {"msg": q.get("msg", ""), "pide_token": pide_token, "app": app}
+            return {"msg": q.get("msg", ""), "pide_token": False, "app": app,
+                    "csrf": (ses or {}).get("csrf", ""), "usuario": cuenta.usuario if ses else ""}
+
+        # -------- páginas de acceso
+        def _pagina_inicial(self, error="", codigo=201):
+            cuerpo = ('<form method="post" action="/configuracion-inicial">'
+                      '<label class="campo"><span>Código de configuración</span><input name="codigo" required '
+                      'autocomplete="off" spellcheck="false"><span class="ayuda">Está en el log del contenedor '
+                      '(<code>docker compose logs vigilante</code>) y en <code>codigo-inicial.txt</code> dentro de '
+                      'la carpeta de datos.</span></label>'
+                      '<label class="campo"><span>Usuario</span><input name="usuario" required autocomplete="username"></label>'
+                      '<label class="campo"><span>Contraseña</span><input type="password" name="clave" minlength="12" '
+                      'required autocomplete="new-password"><span class="ayuda">Al menos 12 caracteres.</span></label>'
+                      '<label class="campo"><span>Repite la contraseña</span><input type="password" name="clave2" '
+                      'minlength="12" required autocomplete="new-password"></label>'
+                      + V.boton("Crear la cuenta y entrar", "primario", "check") + '</form>')
+            self._enviar(200 if codigo == 201 else codigo, V.pagina_acceso(
+                "Crea tu cuenta", cuerpo, error,
+                "Es la única cuenta del panel. Solo quien tenga el código del log puede crearla."))
+
+        def _pagina_entrar(self, volver="/", error="", codigo=200):
+            cuerpo = (f'<form method="post" action="/entrar"><input type="hidden" name="volver" '
+                      f'value="{E(volver_seguro(volver), quote=True)}">'
+                      '<label class="campo"><span>Usuario</span><input name="usuario" required autofocus '
+                      'autocomplete="username"></label>'
+                      '<label class="campo"><span>Contraseña</span><input type="password" name="clave" required '
+                      'autocomplete="current-password"></label>'
+                      + V.boton("Entrar", "primario", "flecha") + '</form>')
+            self._enviar(codigo, V.pagina_acceso("Entrar", cuerpo, error))
 
         def _responder_ext(self, r):
             if r[0] == "redirigir":
@@ -1146,9 +1196,28 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
             q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query, keep_blank_values=True).items()}
             if ruta == "/salud":
                 return self._enviar(200, "ok", "text/plain")
-            if not self._exigir_acceso():
-                return
-            ctx = self._ctx(q)
+            api = panel.token_ok(self.headers.get("X-Token", ""))
+            if not cuenta.existe() and not api:
+                if ruta == "/configuracion-inicial":
+                    return self._pagina_inicial()
+                return self._redirigir("/configuracion-inicial")
+            if ruta in ("/configuracion-inicial", "/entrar"):
+                if self._sesion() or not cuenta.existe():
+                    return self._redirigir("/")
+                if ruta == "/entrar":
+                    return self._pagina_entrar(q.get("volver", "/"))
+                return self._redirigir("/entrar")
+            ses = self._sesion()
+            if not ses and not api:
+                if ruta.startswith("/api/"):
+                    return self._enviar(401, json.dumps({"error": "sin sesión"}), "application/json")
+                return self._redirigir("/entrar?volver=" + urllib.parse.quote(self.path, safe=""))
+            ctx = self._ctx(q, ses)
+            if ruta == "/ajustes":
+                return self._redirigir("/ajustes/general")
+            if ruta.startswith("/ajustes/"):
+                p = panel_ajustes.pagina(panel, ctx, ruta.split("/")[2])
+                return self._enviar(200, p) if p else self._no_encontrado(ctx)
             if extension and ruta.startswith("/demo"):
                 return self._responder_ext(extension.get(self, ruta, q, panel, ctx))
             paginas = {"/": panel.inicio, "/vulnerabilidades": panel.vulnerabilidades,
@@ -1178,20 +1247,30 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
 
         def do_POST(self):
             ruta = urllib.parse.urlparse(self.path).path
-            largo = min(int(self.headers.get("Content-Length") or 0), 10_000)
-            form = {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(largo).decode()).items()}
-            if not self._exigir_acceso():
-                return
-            token = form.get("token") or self.headers.get("X-Token", "") or _cookie(self.headers, "vigilante_token")
-            con_basic = not token and self._basic_ok() and self._mismo_origen()
-            if not (panel.token_ok(token) or con_basic):
-                ctx = {"msg": "Token incorrecto o sin configurar (VIGILANTE_PANEL_TOKEN). No se ha hecho nada.",
-                       "pide_token": True}
-                return self._enviar(403, panel.mantenimiento(ctx) if ruta == "/api/mantenimiento" else
-                                    panel.envolver("Acceso denegado", V.tarjeta(V.vacio(
-                                        "Hace falta el token del panel para hacer cambios.", "candado")), "", ctx))
-            self._cookie = (f"vigilante_token={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200"
-                            if token else None)
+            largo = min(int(self.headers.get("Content-Length") or 0), 20_000)
+            form = {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(largo).decode(),
+                                                               keep_blank_values=True).items()}
+            self._cookie = None
+            if ruta == "/configuracion-inicial":
+                return self._crear_cuenta(form)
+            if ruta == "/entrar":
+                return self._entrar(form)
+            ses = self._sesion()
+            if ses:
+                # CSRF: el formulario tiene que traer el token de ESTA sesión
+                if not hmac.compare_digest(form.get("csrf", ""), ses["csrf"]):
+                    ctx = self._ctx({"msg": "La página había caducado: vuelve a intentarlo. No se ha hecho nada."}, ses)
+                    return self._enviar(403, panel.envolver("Acción no válida", V.tarjeta(V.vacio(
+                        "La petición no venía de esta sesión del panel.", "candado")), "", ctx))
+            elif not panel.token_ok(form.get("token") or self.headers.get("X-Token", "")):
+                if ruta == "/salir":
+                    return self._redirigir("/entrar", self._cookie_sesion("", borrar=True))
+                return self._enviar(403, "Hace falta iniciar sesión (o el token de API).", "text/plain; charset=utf-8")
+            if ruta == "/salir":
+                cuenta.cerrar(self._sid())
+                return self._redirigir("/entrar", self._cookie_sesion("", borrar=True))
+            if ruta.startswith("/ajustes/"):
+                return self._accion_ajustes(ruta, form)
             if extension and ruta.startswith("/demo"):
                 return self._responder_ext(extension.post(self, ruta, form))
             if ruta.startswith("/api/plan/"):
@@ -1227,6 +1306,77 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
                 return self._redirigir(f"{volver}?msg={urllib.parse.quote(msg)}", self._cookie)
             self._enviar(404, "No encontrado", "text/plain")
 
+        def _crear_cuenta(self, form):
+            if cuenta.existe():
+                return self._redirigir("/entrar")
+            if self._bloqueado():
+                return
+            if form.get("clave", "") != form.get("clave2", ""):
+                return self._pagina_inicial("Las dos contraseñas no coinciden.", 400)
+            try:
+                cuenta.crear(form.get("usuario", ""), form.get("clave", ""), codigo=form.get("codigo", ""))
+            except ErrorCuenta as e:
+                if "código" in str(e):
+                    limite.fallo(self._ip())
+                return self._pagina_inicial(str(e), 400)
+            limite.acierto(self._ip())
+            sid = cuenta.crear_sesion(self._ip(), self.headers.get("User-Agent", ""))
+            msg = urllib.parse.quote("Cuenta creada. Configura aquí los avisos (Telegram, email…).")
+            return self._redirigir(f"/ajustes/avisos?msg={msg}", self._cookie_sesion(sid))
+
+        def _entrar(self, form):
+            if not cuenta.existe():
+                return self._redirigir("/configuracion-inicial")
+            if self._bloqueado():
+                return
+            volver = volver_seguro(form.get("volver", "/"))
+            if not cuenta.comprobar(form.get("usuario", ""), form.get("clave", "")):
+                limite.fallo(self._ip())
+                log.warning("Intento de acceso fallido al panel desde %s", self._ip())
+                return self._pagina_entrar(volver, "Usuario o contraseña incorrectos.", 401)
+            limite.acierto(self._ip())
+            sid = cuenta.crear_sesion(self._ip(), self.headers.get("User-Agent", ""))
+            return self._redirigir(volver, self._cookie_sesion(sid))
+
+        def _accion_ajustes(self, ruta, form):
+            accion = ruta.split("/")[2] if ruta.count("/") >= 2 else ""
+            pestana = form.get("pestana", "general")
+            try:
+                if accion in ("guardar", "probar"):
+                    cambiados = panel.ajustes.guardar(pestana, form)
+                    if "general.nombre_web" in cambiados:
+                        vigilante.avisador.web = vigilante.cfg["general"]["nombre_web"]
+                    msg = (f"Guardado ({len(cambiados)} cambio(s)). Ya está en uso." if cambiados
+                           else "No había nada que cambiar.")
+                    if accion == "probar":
+                        canal = form.get("canal", "")
+                        if canal == "telegram":
+                            fallo = vigilante.gestor.bot.probar()
+                        elif canal in ("webhook", "email"):
+                            fallo = vigilante.avisador.probar(canal)
+                        else:
+                            fallo = "Canal desconocido."
+                        msg = (f"{msg} Prueba enviada por {canal}: comprueba que ha llegado." if not fallo
+                               else f"{msg} La prueba por {canal} falló: {fallo}")
+                elif accion == "clave":
+                    pestana = "cuenta"
+                    if form.get("nueva", "") != form.get("nueva2", ""):
+                        msg = "Las dos contraseñas nuevas no coinciden. No se ha cambiado nada."
+                    else:
+                        cuenta.cambiar_clave(form.get("actual", ""), form.get("nueva", ""), self._sid())
+                        msg = "Contraseña cambiada. Las demás sesiones se han cerrado."
+                elif accion == "sesiones":
+                    pestana = "cuenta"
+                    n = cuenta.cerrar_otras(self._sid())
+                    msg = f"Se han cerrado {n} sesión(es)."
+                else:
+                    return self._enviar(404, "No encontrado", "text/plain")
+            except (ErrorAjuste, ErrorCuenta) as e:
+                msg = f"No se ha guardado: {e}"
+            if pestana not in panel_ajustes.NOMBRES:
+                pestana = "general"
+            self._redirigir(f"/ajustes/{pestana}?msg={urllib.parse.quote(msg)}")
+
         def _accion_plan(self, ruta, form):
             partes = ruta.split("/")       # /api/plan/<id>/<accion>
             if len(partes) != 5:
@@ -1260,5 +1410,5 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
 
     srv = ThreadingHTTPServer((host, puerto), Manejador)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log.info("Panel en http://%s:%d%s", host, puerto, " (con contraseña)" if clave else "")
+    log.info("Panel en http://%s:%d", host, puerto)
     return srv

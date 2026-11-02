@@ -27,19 +27,52 @@ VERIF = {"ok": "superada", "solo_estatica": "solo estática (sin contenedores de
          "parcial": "parcial", "fallo": "FALLIDA", "en_curso": "en curso"}
 
 
+def _sin_token(texto: str, token: str) -> str:
+    """Los errores de urllib incluyen la URL, que lleva el token del bot: no debe acabar en el panel."""
+    return texto.replace(token, "<token>") if token else texto
+
+
 class Bot:
     def __init__(self, cfg_avisos: dict, al_pulsar):
-        self.token = cfg_avisos.get("telegram_token")
-        self.chat = str(cfg_avisos.get("telegram_chat_id") or "")
-        self.usuarios = {str(u) for u in cfg_avisos.get("telegram_usuarios") or []}
-        self.api = (cfg_avisos.get("telegram_api") or "https://api.telegram.org").rstrip("/")
+        # se lee la configuración en cada uso: lo que se cambie en Ajustes vale al momento, sin reiniciar
+        self.cfg = cfg_avisos
         self.al_pulsar = al_pulsar      # función(accion, plan_id, n, usuario) -> texto de respuesta
         self.offset = 0
         self.parar = threading.Event()
+        self._hilo: threading.Thread | None = None
+        self._token_escucha = None
+
+    @property
+    def token(self):
+        return self.cfg.get("telegram_token") or ""
+
+    @property
+    def chat(self):
+        return str(self.cfg.get("telegram_chat_id") or "")
+
+    @property
+    def usuarios(self):
+        return {str(u) for u in self.cfg.get("telegram_usuarios") or []}
+
+    @property
+    def api(self):
+        return (self.cfg.get("telegram_api") or "https://api.telegram.org").rstrip("/")
 
     @property
     def activo(self):
         return bool(self.token and self.chat)
+
+    def probar(self) -> str:
+        """Mensaje de prueba desde Ajustes. Devuelve '' si llegó o el motivo del fallo."""
+        if not self.activo:
+            return "Falta el token del bot o el ID del chat."
+        try:
+            self._api("sendMessage", {"chat_id": self.chat, "parse_mode": "HTML",
+                                      "text": "<b>Patchwarden</b>: mensaje de prueba. Los avisos y los botones de "
+                                              "aprobar llegarán a este chat."}, timeout=15)
+        except Exception as e:  # noqa: BLE001
+            return f"Telegram no lo aceptó: {_sin_token(str(e), self.token)}"
+        return ""
 
     def _api(self, metodo, datos, timeout=40):
         return peticion(f"{self.api}/bot{self.token}/{metodo}", datos, timeout=timeout, reintentos=2)
@@ -69,12 +102,20 @@ class Bot:
 
     # ------------------------------------------------------------------ escucha de botones
     def arrancar(self):
-        if self.activo:
-            threading.Thread(target=self._bucle, daemon=True, name="telegram").start()
-            log.info("Bot de Telegram escuchando botones")
+        """Arranca la escucha una vez; si el bot no está configurado, espera a que se configure en Ajustes."""
+        if self._hilo and self._hilo.is_alive():
+            return
+        self._hilo = threading.Thread(target=self._bucle, daemon=True, name="telegram")
+        self._hilo.start()
 
     def _bucle(self):
         while not self.parar.is_set():
+            if not self.activo:
+                self.parar.wait(5)
+                continue
+            if self.token != self._token_escucha:      # bot nuevo (o primero): empezar de cero
+                self._token_escucha, self.offset = self.token, 0
+                log.info("Bot de Telegram escuchando botones")
             try:
                 r = self._api("getUpdates", {"offset": self.offset, "timeout": 25,
                                              "allowed_updates": ["callback_query"]}, timeout=40)

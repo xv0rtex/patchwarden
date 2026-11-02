@@ -14,9 +14,18 @@ res = []
 def ok(c, t): res.append((bool(c), t)); print(("OK    " if c else "FALLO ") + t)
 with sync_playwright() as p:
     b = p.chromium.launch()
-    ctx = b.new_context(viewport={"width":1440,"height":900}, http_credentials={"username":"demo","password":CLAVE})
+    ctx = b.new_context(viewport={"width":1440,"height":900})
     pg = ctx.new_page(); err=[]
     pg.on("pageerror", lambda e: err.append(str(e)))
+    # login: sin sesión todo lleva a /entrar; una contraseña mala no entra
+    pg.goto(B+"/correcciones")
+    ok("/entrar" in pg.url, "sin sesión, el panel pide entrar")
+    pg.fill("input[name=usuario]", "demo"); pg.fill("input[name=clave]", "mala-mala-mala")
+    with pg.expect_navigation(): pg.click("button:has-text('Entrar')")
+    ok("incorrectos" in pg.inner_text("body"), "contraseña incorrecta: no entra")
+    pg.fill("input[name=usuario]", "demo"); pg.fill("input[name=clave]", CLAVE)
+    with pg.expect_navigation(): pg.click("button:has-text('Entrar')")
+    ok(pg.url.endswith("/correcciones"), "tras entrar vuelve a la página pedida")
     # Claude NO trabaja solo: hay que pedirlo. Se pide php (cancelando primero) y twig desde Componentes
     pg.goto(B+"/correcciones")
     ok(pg.locator("#t-planes-activos tbody tr").count() == 0, "al empezar no hay ninguna corrección: Claude no ha hecho nada solo")
@@ -109,6 +118,30 @@ with sync_playwright() as p:
     with pg.expect_navigation(): pg.locator(f"#{mid} + .tg-k button", has_text="Rechazar todo").click()
     ok("rechazado" in pg.inner_text(".toast").lower(), f"Telegram simulado: {pg.inner_text('.toast')}")
     pg.screenshot(path="/tmp/caps/i-telegram.png")
+    # Ajustes: cambiar una regla, probar Telegram (llega al bot simulado) y ver el consumo
+    pg.goto(B+"/ajustes/reglas")
+    pg.fill("input[name='reglas.cvss_critico']", "8.5")
+    with pg.expect_navigation(): pg.locator("form", has=pg.locator("input[name='reglas.cvss_critico']")).get_by_role("button", name="Guardar").click()
+    ok("Guardado" in pg.inner_text(".toast") and pg.input_value("input[name='reglas.cvss_critico']") == "8.5",
+       "Ajustes › Reglas: se guarda y se queda")
+    pg.goto(B+"/ajustes/avisos")
+    ok("DEMO" not in pg.inner_text("main") and pg.locator("input[name='avisos.telegram_token']").get_attribute("value") is None,
+       "el token del bot no se envía al navegador")
+    with pg.expect_navigation(): pg.click("button:has-text('Guardar y enviar prueba') >> nth=0")
+    ok("Prueba enviada por telegram" in pg.inner_text(".toast"), f"prueba de Telegram: {pg.inner_text('.toast')}")
+    pg.goto(B+"/demo"); ok("mensaje de prueba" in pg.inner_text(".tg-chat"), "el mensaje de prueba llega al bot simulado")
+    pg.goto(B+"/ajustes/consumo"); ok(pg.locator("#t-consumo tbody tr").count() >= 2, "Ajustes › Consumo: una fila por ejecución de Claude")
+    for ancho in (390, 1440):
+        pg.set_viewport_size({"width": ancho, "height": 900})
+        for pes in ("avisos", "consumo", "cuenta"):
+            pg.goto(B+f"/ajustes/{pes}")
+            ok(pg.evaluate("document.documentElement.scrollWidth <= window.innerWidth + 1"),
+               f"/ajustes/{pes} sin scroll horizontal a {ancho}px")
+            pg.screenshot(path=f"/tmp/caps/i-ajustes-{pes}-{ancho}.png", full_page=True)
+    pg.set_viewport_size({"width": 1440, "height": 900})
+    with pg.expect_navigation(): pg.click(".side-user button.salir")
+    ok("/entrar" in pg.url, "salir cierra la sesión")
+    pg.goto(B+"/correcciones"); ok("/entrar" in pg.url, "tras salir, el panel vuelve a pedir entrar")
     ok(not err, f"sin errores JS {err}")
     b.close()
 print(sum(c for c,_ in res), "/", len(res))
