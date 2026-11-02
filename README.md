@@ -46,31 +46,67 @@ until you approve it.**
 
 ## Install on a server
 
+Patchwarden has two parts, and the installer sets up either one:
+
+- **Central dashboard** (`central/`): the web dashboard. It watches its own server, receives the
+  agents and prepares fixes with Claude. You need one.
+- **Agent** (`agente/`): a small client for each additional server. It detects, tests and applies on
+  that server and only makes outgoing connections to the dashboard, so no ports need to be opened.
+  It has no dashboard and never runs Claude.
+
 On a Linux server with Docker:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/xv0rtex/patchwarden/main/instalar.sh | bash
 ```
 
-The script downloads Patchwarden, **finds the apps already running in Docker**, picks a free
-port, writes the configuration and a password, and starts everything. At the end it prints the
-dashboard URL, the username and the password. It also asks for a Telegram bot token and a
-Claude Code token; both are optional, and you can press Enter to skip them.
+The script shows a menu. On a new server it asks what to install. For the dashboard it **finds
+the apps already running in Docker**, picks a free port, writes the configuration and a
+password, and starts everything. At the end it prints the dashboard URL, the username and the
+password. It also asks for a Telegram bot token and a Claude Code token; both are optional.
+
+To add another server, open *Ajustes › Equipos* (Settings › Servers) in the dashboard. It gives you a
+one-time command for that server:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xv0rtex/patchwarden/main/instalar.sh | bash -s -- --agente --central https://your-dashboard --codigo CODE
+```
+
+### Updating
+
+Each installation keeps a copy of the installer in its folder (`/opt/vigilante` and
+`/opt/vigilante-agente` as root, or the same names under your home folder). Run it to open the menu:
+
+```bash
+bash /opt/vigilante/instalar.sh                 # menu
+bash /opt/vigilante/instalar.sh --actualizar    # update without questions
+```
+
+| Menu entry | What it does |
+|---|---|
+| Update | Downloads the latest code from GitHub, rebuilds and redeploys. Tokens, the dashboard account, data, scan results and agent registrations are kept. If the new version does not start, it goes back to the previous one. |
+| Update and look for apps again | The same, and it also finds apps you have added or removed |
+| Change tokens | Changes the Telegram or Claude Code token without reinstalling |
+| Stop / Start / Uninstall | Uninstalling asks you to type `borrar` (delete) because it removes the data |
+
+After an update, the scan is not repeated if the last one is recent and nothing has changed on the
+server.
 
 | Option | What it does |
 |---|---|
-| *(none)* | Watches and proposes only: your projects are mounted read-only |
+| `--panel` / `--agente` | Install the dashboard or the agent without the menu |
+| `--central URL --codigo CODE` | Agent: dashboard URL and one-time registration code |
+| `--actualizar` / `--reconfigurar` | Update / update and look for apps again |
 | `--permitir-aplicar` | Allows approved changes to be applied (with backup and rollback) |
 | `--puerto N` | Dashboard port |
 | `--local` | Dashboard only on `127.0.0.1` |
 | `--solo NAME` | Watches a single app or project |
 | `--tunel` | Publishes the dashboard through a free Cloudflare quick tunnel |
-| `--url` | Shows the current tunnel URL |
-| `--parar` / `--desinstalar` | Stops / removes Patchwarden |
+| `--permitir-http` | Agent: allows an `http://` dashboard URL (only inside a private network or VPN) |
+| `--estado` / `--url` / `--parar` / `--desinstalar` | Status / tunnel URL / stop / remove |
+| `--sin-preguntas` | Never asks anything (for scripts) |
 
-Running the script again updates Patchwarden, refreshes the discovered apps and keeps your
-settings. Each Docker Compose project counts as an *app*, and the dashboard lets you view one or
-all of them.
+Each Docker Compose project counts as an *app*, and the dashboard lets you view one or all of them.
 
 ## Fixes with Claude Code (no API billing)
 
@@ -118,12 +154,19 @@ the host, so approved changes can be deployed from inside the container.
   (`[aplicacion].webhook_despliegue`), and mount your code read-only.
 - **Every change needs your approval**, with a backup first and an automatic rollback if the
   site stops responding.
-- The dashboard always asks for a username and password, and locks out an address for 5 minutes
-  after 10 failed attempts.
+- **One dashboard account with a normal login.** The password is stored with scrypt. Sessions use
+  `HttpOnly`/`SameSite=Strict` cookies and every form carries a CSRF token. After 10 failed
+  attempts an address is locked out for 5 minutes. If the installer did not set a password, the
+  first visit asks you to create the account with a one-time code printed in the container log.
+- **Agents do not blindly trust the dashboard.** An agent only applies a change whose verification
+  it ran itself, reverts from its own backup, only touches its own project folders, and refuses to
+  apply anything when it is installed in proposals-only mode. Agent tokens are stored hashed and
+  revoking a server in *Ajustes › Equipos* cuts it off immediately.
 
 ## Add it to an existing site
 
-1. Copy the `vigilante/` folder next to your `docker-compose.yml`.
+1. Copy the `vigilante/` and `central/` folders next to your `docker-compose.yml`
+   (build with `context: .` and `dockerfile: central/Dockerfile`).
 2. Add the `docker-proxy` and `vigilante` services from the example, and the label
    `vigilante.vigilar: "true"` to your site's containers.
 3. Mount your code (to read `composer.lock`, `package-lock.json`, `pom.xml`…). Mount it read-only
@@ -143,6 +186,16 @@ bash demo/parar.sh        # stops everything
 ```
 
 Visit `/demo` to see the simulated Telegram bot with its approve, reject, apply and revert buttons.
+The demo also has a second, simulated server (`srv-madrid`) with a real agent connected over HTTP,
+so you can request, approve and apply a fix on a remote server.
+
+## Settings
+
+Everything you would otherwise edit in `vigilante.toml` can be changed in *Ajustes* (Settings), and
+it takes effect at once, without a restart: Telegram (with a "send a test message" button),
+webhook and email, the Claude Code token and default model, Claude usage history, alert rules,
+servers with agents, and your password. A value set through an environment variable is shown
+locked. Secrets are never sent back to the browser.
 
 ## Run without Docker
 
@@ -158,6 +211,7 @@ python3 -m vigilante -c my.toml                                 # service + dash
 ```bash
 python3 -m unittest discover -s pruebas    # unit tests
 python3 pruebas/prueba_flujo.py            # full flow with simulated Docker, Claude Code and Telegram
+PRUEBA_AGENTE=1 python3 pruebas/prueba_flujo.py   # the same flow with a central dashboard + agent over HTTP
 ```
 
 `pruebas/prueba_navegador.py` tests the dashboard in Chromium (needs Playwright).
@@ -166,7 +220,10 @@ python3 pruebas/prueba_flujo.py            # full flow with simulated Docker, Cl
 
 | Path | Contents |
 |---|---|
-| [`vigilante/`](vigilante/) | The service: detection, sources, dashboard, Claude Code integration |
+| [`central/`](central/) | Image of the central dashboard (includes Claude Code) |
+| [`agente/`](agente/) | Image of the agent installed on each additional server (no dashboard, no Claude) |
+| [`vigilante/`](vigilante/) | Shared Python code: detection, sources, dashboard, agent, Claude Code integration |
+| [`instalar.sh`](instalar.sh) | Installer and updater for both |
 | [`ejemplo/`](ejemplo/) | A PHP + nginx site ready for `docker compose` |
 | [`demo/`](demo/) | The simulated demo |
 | [`pruebas/`](pruebas/) | Tests and simulators |

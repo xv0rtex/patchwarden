@@ -146,6 +146,7 @@ ENTORNO = {
     "VIGILANTE_PANEL_CLAVE": ("panel", "clave"),
     "VIGILANTE_CENTRAL": ("central", "url"),
     "VIGILANTE_CODIGO": ("central", "codigo"),
+    "VIGILANTE_CENTRAL_PERMITIR_HTTP": ("central", "permitir_http"),
 }
 
 

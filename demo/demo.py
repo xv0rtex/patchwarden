@@ -5,12 +5,15 @@ No usa ninguna clave ni acceso real:
   - Claude: API falsa local que devuelve planes de ejemplo (pruebas/apis_falsas.py).
   - Telegram: Bot API falsa; los mensajes se ven y se «pulsan» en /demo del panel.
   - La web «desplegada» es una copia del proyecto de ejemplo en /tmp/vig-demo/proyecto.
+  - Un segundo servidor, «srv-madrid», con un AGENTE real conectado al panel por HTTP (como en
+    producción): su app «tienda-web» es otra copia del ejemplo, en /tmp/vig-demo/proyecto-srv2.
 Lo único real son las consultas públicas de vulnerabilidades (NVD, OSV, KEV, EPSS…).
 
     DEMO_CLAVE=xxxx python3 demo/demo.py      (puerto 8090 en 127.0.0.1; usuario «demo»)
 
 Sale con código 3 cuando se pide «Reiniciar demo» (el script arrancar.sh lo vuelve a lanzar).
 """
+import copy
 import html
 import logging
 import os
@@ -36,15 +39,18 @@ log = logging.getLogger("demo")
 
 def preparar_datos():
     proyecto = os.path.join(TMP, "proyecto")
-    for d in ("proyecto", "datos/planes", "datos/respaldos", "datos/pruebas", "mant"):
+    for d in ("proyecto", "proyecto-srv2", "datos-agente", "mant-srv2",
+              "datos/planes", "datos/respaldos", "datos/pruebas", "mant"):
         shutil.rmtree(os.path.join(TMP, d), ignore_errors=True)
     # la cuenta se recrea con DEMO_USUARIO/DEMO_CLAVE y los ajustes vuelven a los de la demo en cada arranque
-    for f in ("datos/estado.json", "datos/cuenta.json", "datos/ajustes.json", "despliegues.log", "web_rota", "romper"):
+    for f in ("datos/estado.json", "datos/cuenta.json", "datos/ajustes.json", "datos/equipos.json",
+              "despliegues.log", "web_rota", "romper"):
         try:
             os.remove(os.path.join(TMP, f))
         except OSError:
             pass
     shutil.copytree(os.path.join(RAIZ, "ejemplo"), proyecto, ignore=shutil.ignore_patterns(".env"))
+    shutil.copytree(os.path.join(RAIZ, "ejemplo"), os.path.join(TMP, "proyecto-srv2"), ignore=shutil.ignore_patterns(".env"))
     cache = os.path.join(TMP, "datos", "cache")
     if not os.path.isdir(cache):
         for origen in ("/tmp/vig-flujo/datos/cache", "/tmp/vig/datos/cache"):
@@ -127,6 +133,25 @@ class ExtensionDemo:
         return 404, "No encontrado", "text/plain"
 
 
+def arrancar_agente(v, cfg):
+    """Segundo servidor simulado: un agente de verdad, dado de alta con un código y hablando por HTTP."""
+    from vigilante.agente import Agente
+    srv2 = os.path.join(TMP, "proyecto-srv2")
+    c = copy.deepcopy(cfg)
+    c["general"]["carpeta_datos"] = os.path.join(TMP, "datos-agente")
+    c["deteccion"].update(docker=False, rutas_proyecto=[srv2], apps={srv2: "tienda-web"}, url_web="")
+    c["mantenimiento"]["carpeta"] = os.path.join(TMP, "mant-srv2")
+    c["central"].update(url=f"http://127.0.0.1:{PUERTO}")
+    agente = Agente(c)
+    agente.dar_de_alta(v.registro.crear_alta("srv-madrid"))
+    threading.Thread(target=agente.ejecutar, daemon=True, name="agente-srv-madrid").start()
+    fin = time.time() + 30
+    while time.time() < fin and not any((e.get("inventario") or {}).get("componentes")
+                                        for e in v.registro.activos().values()):
+        time.sleep(0.2)
+    log.info("Agente «srv-madrid» conectado (app tienda-web)")
+
+
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
                         stream=sys.stdout)
@@ -175,6 +200,7 @@ def main():
     v = Vigilante(cfg)
     v.gestor.arrancar_bot()
     panel.arrancar(v, PUERTO, extension=ExtensionDemo(tg, v))
+    arrancar_agente(v, cfg)
     log.info("Preparando datos de ejemplo (análisis de vulnerabilidades; Claude no se usa hasta que alguien lo pida)…")
     v.ciclo("demo")
     v.gestor.cola.join()

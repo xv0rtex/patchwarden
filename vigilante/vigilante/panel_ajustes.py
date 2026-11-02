@@ -2,11 +2,14 @@
 from __future__ import annotations
 
 import datetime as dt
+import shlex
 import time
 
 from . import consumo
 from . import vista as V
 from .ajustes import PESTANAS, enmascarar
+
+URL_INSTALADOR = "https://raw.githubusercontent.com/xv0rtex/patchwarden/main/instalar.sh"
 
 E = V.E
 
@@ -222,11 +225,12 @@ def _equipos(panel, ctx, alta: dict | None) -> str:
 
     if alta:
         url = _url_central(panel, ctx)
-        cmd_docker = f"bash instalar.sh --agente --central {url} --codigo {alta['codigo']}"
+        cmd_docker = (f"curl -fsSL {URL_INSTALADOR} | bash -s -- --agente --central {shlex.quote(url)} "
+                      f"--codigo {alta['codigo']}")
         cmd_python = f"python3 -m vigilante --agente --central {url} --codigo {alta['codigo']}"
         nuevo = V.tarjeta(
-            f'<p style="margin-top:0">Ejecuta esto en el servidor <b>{E(alta["nombre"])}</b>, en la carpeta de '
-            f'Patchwarden. El código <b>solo vale una vez y caduca en 1 hora</b>; no se volverá a mostrar.</p>'
+            f'<p style="margin-top:0">Ejecuta esto en el servidor <b>{E(alta["nombre"])}</b>. Instala el agente '
+            f'con Docker; para actualizarlo más adelante no hace falta otro código. El código <b>solo vale una vez y caduca en 1 hora</b>; no se volverá a mostrar.</p>'
             f'<label class="campo"><span>Con Docker (recomendado)</span><input class="mono" readonly value="{E(cmd_docker, quote=True)}" '
             f'onclick="this.select()"></label>'
             f'<label class="campo"><span>Sin Docker</span><input class="mono" readonly value="{E(cmd_python, quote=True)}" '

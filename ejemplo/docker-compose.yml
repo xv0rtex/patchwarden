@@ -53,7 +53,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
 
   vigilante:
-    build: ../vigilante
+    build: { context: .., dockerfile: central/Dockerfile }
     restart: unless-stopped
     env_file: .env
     environment:
