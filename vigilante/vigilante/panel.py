@@ -3,25 +3,29 @@
 Páginas: resumen, vulnerabilidades, componentes, correcciones (planes de Claude), detalle de
 cada plan (aprobar / rechazar / aplicar / revertir) y modo mantenimiento.
 
-Acceso: contraseña opcional para todo el panel (HTTP Basic) y token para las acciones. Si hay
-contraseña, las acciones la aceptan en lugar del token siempre que la petición venga de la propia
-página (comprobación de origen contra CSRF).
+Acceso: cuenta única con login (usuarios.py). Sin cuenta, todo lleva a /configuracion-inicial,
+que pide el código de un solo uso del log. Cada formulario POST lleva el token CSRF de la sesión.
+[panel] token, si se configura, es un token de API para scripts (cabecera X-Token o campo «token»).
 """
 from __future__ import annotations
 
-import base64
 import datetime as dt
 import functools
 import hmac
+import ipaddress
 import json
 import logging
+import re
 import threading
 import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import claude
+from . import api_agente, claude, consumo, panel_ajustes
 from . import vista as V
+from .ajustes import Ajustes, ErrorAjuste
+from .equipos_remotos import ErrorEquipo
+from .usuarios import Cuenta, ErrorCuenta
 from .modelo import ORDEN_SEVERIDAD
 from .planes import aprobados, pendientes
 from .versiones import comparar
@@ -58,6 +62,22 @@ def estado_verificacion_cambio(plan, c) -> tuple[str, str]:
     return "No se pudo preparar en la copia", "mal"
 
 
+_FORM_POST = re.compile(r'(<form\b[^>]*\bmethod=["\']?post["\']?[^>]*>)', re.I)
+
+
+def con_csrf(html: str, csrf: str) -> str:
+    """Añade el token CSRF de la sesión a todos los formularios POST de la página."""
+    if not csrf:
+        return html
+    campo = f'<input type="hidden" name="csrf" value="{E(csrf, quote=True)}">'
+    return _FORM_POST.sub(lambda m: m.group(1) + campo, html)
+
+
+def volver_seguro(ruta: str) -> str:
+    """Solo rutas internas (evita redirecciones abiertas tras el login)."""
+    return ruta if ruta.startswith("/") and not ruta.startswith(("//", "/\\")) else "/"
+
+
 class LimiteIntentos:
     """Bloquea una IP unos minutos tras varios intentos de contraseña fallidos (el panel puede ser público)."""
 
@@ -88,6 +108,15 @@ class Panel:
     def __init__(self, vigilante):
         self.v = vigilante
         self.cfg = vigilante.cfg["panel"]
+        self.cuenta = Cuenta(vigilante.datos)
+        self.ajustes = Ajustes(vigilante.cfg, vigilante.datos)
+        if not self.cuenta.existe():
+            if self.cfg.get("usuario") and self.cfg.get("clave"):
+                # migración desde la contraseña HTTP Basic: la cuenta se crea con esas credenciales
+                self.cuenta.crear(self.cfg["usuario"], self.cfg["clave"], validar=False)
+            else:
+                log.warning("Panel sin cuenta: abre /configuracion-inicial y usa este código para crearla: %s",
+                            self.cuenta.codigo_inicial())
 
     def token_ok(self, token):
         esperado = self.cfg.get("token") or ""
@@ -136,7 +165,7 @@ class Panel:
         pendientes_n = sum(1 for p in planes if p["estado"] == "pendiente_aprobacion")
         criticas = sum(1 for h in hs_f if h["critico"])
         apps, selector = self._resumen_apps(), ""
-        if len(apps) > 1:
+        if len(apps) > 1 and not activo.startswith("/ajustes"):
             sel = ctx.get("app", "")
             ops = f'<option value="">Todas las apps ({len(apps)})</option>' + "".join(
                 f'<option value="{E(a, quote=True)}"{" selected" if a == sel else ""}>{E(a)} · {d["vulns"]} vuln.'
@@ -146,20 +175,40 @@ class Panel:
         if aviso:
             aviso = f'<div class="aviso-demo">{aviso}</div>'
         extra_nav = self.cfg.get("nav_extra") or []
-        return V.pagina(titulo, cuerpo, activo=activo, web=self.v.cfg["general"]["nombre_web"], aviso=aviso,
+        html = V.pagina(titulo, cuerpo, activo=activo, web=self.v.cfg["general"]["nombre_web"], aviso=aviso,
                         toast=ctx.get("msg", ""), badges={"/correcciones": pendientes_n,
                                                           "/vulnerabilidades": criticas},
-                        extra_nav=extra_nav, dialogo_token=ctx.get("pide_token", False), selector=selector, **kw)
+                        extra_nav=extra_nav, dialogo_token=False, selector=selector,
+                        usuario=ctx.get("usuario", ""), **kw)
+        return con_csrf(html, ctx.get("csrf", ""))
 
-    def _form_resolver(self, campos: str, texto: str, etiqueta: str, tamano_pequeno=True) -> str:
+    def _form_resolver(self, campos: str, texto: str, etiqueta: str, consulta: dict, tamano_pequeno=True) -> str:
         """Formulario con ventana de confirmación: el usuario inicia EXPLÍCITAMENTE la resolución con Claude."""
         pequeno = 'style="padding:4px 12px"' if tamano_pequeno else ""
         aviso = (" Se enviarán a Anthropic, a través de Claude Code, las vulnerabilidades y los ficheros de despliegue del "
                  "proyecto (nunca los .env ni los datos de la app), y consume uso de tu plan de Claude. Claude solo "
                  "propone: no se modificará nada hasta que apruebes cada cambio.")
+        # data-claude: el diálogo muestra la elección de modelo/razonamiento y pide la estimación al abrirse
         return (f'<form method="post" action="/api/claude/resolver" data-confirmar="{E(texto + aviso, quote=True)}" '
-                f'data-titulo="Corregir con Claude" data-boton="Sí, corregir con Claude">{campos}'
+                f'data-titulo="Corregir con Claude" data-boton="Sí, corregir con Claude" '
+                f'data-claude="{E(urllib.parse.urlencode(consulta), quote=True)}">{campos}'
                 f'{V.boton(etiqueta, "secundario", "robot", attrs=pequeno)}</form>')
+
+    def estimacion(self, q: dict) -> dict:
+        """Para el diálogo de «Corregir con Claude»: estimaciones por modelo y razonamiento + estado del plan."""
+        g = self.v.gestor
+        if q.get("app"):
+            comps = g.candidatos_app(q["app"])
+        else:
+            comps = [c for c in self.v.estado.get("componentes", []) if c["clave"] == q.get("clave")]
+        m, e = g.eleccion()
+        lim = g.consumo.limites()
+        return {"defecto": f"{m}|{e}", "n": len(comps), "estimaciones": g.estimaciones(comps),
+                "limites": {k: {"uso": w["uso"], "reinicio": consumo.hora_reinicio(w.get("reinicio")),
+                                "reiniciada": bool(w.get("reiniciada"))}
+                            for k, w in lim["ventanas"].items() if w},
+                "medido": _hora(dt.datetime.fromtimestamp(lim["fecha"]).isoformat(timespec="seconds"))
+                if lim.get("fecha") else ""}
 
     def _celda_resolver(self, c: dict) -> str:
         estado, dato = self.v.gestor.estado_resolver(c)
@@ -168,7 +217,7 @@ class Panel:
         if estado == "disponible":
             return self._form_resolver(f'<input type="hidden" name="clave" value="{E(c["clave"], quote=True)}">',
                                        f"Claude preparará una corrección para {c['nombre']} {c['version']}"
-                                       f"{self._resumen_cambio(c)}.", "Corregir con Claude")
+                                       f"{self._resumen_cambio(c)}.", "Corregir con Claude", {"clave": c["clave"]})
         return f'<span class="muted peq">{E(dato) if estado != "sin_vulns" else "—"}</span>'
 
     def _resumen_cambio(self, c: dict) -> str:
@@ -194,7 +243,7 @@ class Panel:
             return ""
         return self._form_resolver(f'<input type="hidden" name="app" value="{E(app, quote=True)}">',
                                    f"Claude preparará correcciones para {n} componente(s) de {app} con vulnerabilidades "
-                                   "importantes (una por componente).", f"Corregir {app} con Claude", False)
+                                   "importantes (una por componente).", f"Corregir {app} con Claude", {"app": app}, False)
 
     def _boton_analizar(self):
         en_curso = self.v.en_curso
@@ -262,10 +311,13 @@ tu decisión</b><p>Claude ha preparado {n_c} cambio(s) y se han verificado en un
         # gráfico: vulnerabilidades por componente y gravedad
         por_comp: dict[str, dict] = {}
         nombres = {}
+        varias = not ctx.get("app") and len(apps) > 1
         for h in hs:
             por_comp.setdefault(h["componente"], {}).setdefault(h["severidad"], 0)
             por_comp[h["componente"]][h["severidad"]] += 1
-            nombres[h["componente"]] = f"{h['nombre']} {h['version']}"
+            # con varias apps a la vista, el mismo «php 8.1.2» puede estar en varias: se dice en cuál
+            nombres[h["componente"]] = (f"{h['nombre']} {h['version']}"
+                                        + (f" · {h['app']}" if varias and h.get("app") else ""))
         orden = sorted(por_comp, key=lambda k: (-por_comp[k].get("CRITICA", 0), -sum(por_comp[k].values())))[:9]
         tope = max((sum(por_comp[k].values()) for k in orden), default=1)
         barras = "".join(V.barra_gravedad(por_comp[k], tope, nombres[k],
@@ -283,10 +335,12 @@ tu decisión</b><p>Claude ha preparado {n_c} cambio(s) y se han verificado en un
         ramas = ""
         if sin_soporte:
             ramas = '<div style="margin-top:16px">' + "".join(
-                f'<div class="callout">{V.icono("alerta", 18)}<div><b>{E(c["nombre"])} {E(c["version"])}</b> sin parches '
+                f'<div class="callout">{V.icono("alerta", 18)}<div><b>{E(c["nombre"])} {E(c["version"])}</b>'
+                f'{(" · " + E(c["app"])) if varias and c.get("app") else ""} sin parches '
                 f'de seguridad desde {E(str((est["info_ramas"][c["clave"]] or {}).get("fin_soporte")))}</div></div>'
                 for c in sin_soporte) + "</div>"
-        lateral = V.tarjeta(ew + ramas, "Estado de la web", icono_nombre="pulso")
+        lateral = V.tarjeta(ew + ramas, "Estado de la web" if len(self.v.equipos) == 1
+                            else "Estado de este servidor", icono_nombre="pulso")
         partes.append(f'<div class="grid g2">{grafico}{lateral}</div>')
 
         # correcciones pendientes + lo más urgente
@@ -366,9 +420,19 @@ tu decisión</b><p>Claude ha preparado {n_c} cambio(s) y se han verificado en un
                                  "info")
             return V.tarjeta(cuerpo, titulo, icono_nombre=ic)
         escaneo = _hora(ciclo.get("fin")) if ciclo else "—"
+        varios = len(self.v.equipos) > 1           # con agentes: columna «Equipo» con su estado
         filas = []
         for app, resumen in apps.items():
             d = self._datos_web(app)
+            celda_eq = ""
+            if varios:
+                id_eq = next((c.get("equipo", "") for c in d["comps"]), "")
+                eq = self.v.equipo(id_eq)
+                nombre_eq = "Este servidor" if not id_eq else (eq.nombre if eq else "(revocado)")
+                estado_eq = ("" if not id_eq else V.pill("En línea", "ok") if eq and eq.en_linea()
+                             else V.pill("Sin conexión", "mal"))
+                celda_eq = (f'<td data-l="Equipo" data-v="{E(nombre_eq)}"><span class="peq">{E(nombre_eq)}</span>'
+                            f'{"<div>" + estado_eq + "</div>" if estado_eq else ""}</td>')
             texto_e, tono = self.ESTADOS_WEB[d["estado"]]
             orden_e = list(self.ESTADOS_WEB).index(d["estado"])
             pend = (f'<div class="peq" style="margin-top:4px">{V.pill(str(resumen["pend"]) + " pendiente(s) de aprobar", "aviso")}</div>'
@@ -383,12 +447,12 @@ tu decisión</b><p>Claude ha preparado {n_c} cambio(s) y se han verificado en un
             filas.append(
                 f'<tr data-href="{E(href)}" data-estado="{d["estado"]}" data-texto="{E(texto)}">'
                 f'<td class="td-n" data-v="{E(app)}"><div class="web-n"><b><a href="{E(href)}">{E(app)}</a></b>{url}</div></td>'
-                f'<td data-l="Versión" data-v="{E(c["nombre"] if c else "")}">{self._celda_version(d)}</td>'
+                f'{celda_eq}<td data-l="Versión" data-v="{E(c["nombre"] if c else "")}">{self._celda_version(d)}</td>'
                 f'<td data-l="Estado" data-v="{orden_e}">{V.pill(texto_e, tono)}{pend}</td>{celdas_sev}'
                 f'<td data-l="Último escaneo" data-v="{E((ciclo or {}).get("fin", ""))}"><span class="mono peq">{E(escaneo)}</span></td></tr>')
         filtros = V.filtros("#t-webs", "Buscar web, URL o componente", "webs",
                             [("estado", k, V.ICONO_TONO[t], n) for k, (n, t) in self.ESTADOS_WEB.items()], abajo=True)
-        cabecera = (V.th("Web") + V.th("Versión actual → última") + V.th("Estado", "num")
+        cabecera = (V.th("Web") + (V.th("Equipo") if varios else "") + V.th("Versión actual → última") + V.th("Estado", "num")
                     + "".join(V.th(n + "s", "num", "num") for _, n in V.SEVERIDADES) + V.th("Último escaneo"))
         tabla = (f'{filtros}<div class="tabla tabla-sola"><table id="t-webs" class="ancha"><thead><tr>{cabecera}'
                  f'</tr></thead><tbody>{"".join(filas)}</tbody></table></div>'
@@ -594,6 +658,17 @@ placeholder="Buscar CVE, componente o texto" aria-label="Buscar vulnerabilidades
     GRUPO_PLAN = {"pendiente_aprobacion": "decidir", "analizando": "curso", "verificando": "curso",
                   "aplicando": "curso", "aplicado": "aplicado", "error": "fallo", "fallo_aplicacion": "fallo"}
 
+    @staticmethod
+    def _celda_consumo(p) -> str:
+        cl = p.get("claude") or {}
+        t = cl.get("total") or {}
+        if not cl.get("llamadas"):
+            return '<td class="num" data-v="0"><span class="muted">—</span></td>'
+        d5 = (t.get("delta") or {}).get("five_hour")
+        modelo = consumo.NOMBRE_MODELO.get(cl.get("modelo"), cl.get("modelo") or "")
+        return (f'<td class="num" data-v="{t.get("coste_usd") or 0}"><span class="mono">{E(consumo.usd(t.get("coste_usd")))}</span>'
+                f'<div class="muted peq">{E(modelo)}{(" · 5 h +" + E(consumo.pct(d5))) if d5 is not None else ""}</div></td>')
+
     def _tabla_planes(self, planes: list, id_: str, ctx) -> str:
         filas = []
         for p in planes:
@@ -616,13 +691,82 @@ placeholder="Buscar CVE, componente o texto" aria-label="Buscar vulnerabilidades
                 f'<td class="num" data-v="{len(p["cambios"])}">{cambios}</td>'
                 f'<td>{V.estado_verif((p.get("verificacion") or {}).get("estado"))}</td>'
                 f'<td data-v="{E(p["estado"])}">{V.estado_plan(p["estado"])}</td>'
+                f'{self._celda_consumo(p)}'
                 f'<td data-v="{E(p.get("creado", ""))}"><span class="mono peq">{E(_hora(p.get("creado")))}</span></td>'
                 f'<td class="accion">{boton}</td></tr>')
         cabecera = (V.th("Componente") + V.th("Versión actual → propuesta") + V.th("Vulns.", "num", "num")
-                    + V.th("Cambios", "num", "num") + V.th("Verificación") + V.th("Estado") + V.th("Creado")
+                    + V.th("Cambios", "num", "num") + V.th("Verificación") + V.th("Estado")
+                    + V.th("Consumo", "num", "num") + V.th("Creado")
                     + "<th><span class='sr'>Acción</span></th>")
         return (f'<div class="tabla"><table id="{id_}" class="ancha"><thead><tr>{cabecera}</tr></thead>'
                 f'<tbody>{"".join(filas)}</tbody></table></div>')
+
+    def _tarjeta_consumo(self, p) -> str:
+        """Modelo, razonamiento, lo estimado antes de empezar y lo gastado de verdad (plan y equivalente API)."""
+        cl = p["claude"]
+        est, llamadas, t = cl.get("estimacion") or {}, cl.get("llamadas") or [], cl.get("total") or {}
+        nombre_m = consumo.NOMBRE_MODELO.get(cl.get("modelo"), cl.get("modelo") or "—")
+        nombre_e = consumo.NOMBRE_ESFUERZO.get(cl.get("esfuerzo"), cl.get("esfuerzo") or "—")
+        filas = [f"<dt>Modelo</dt><dd>{E(nombre_m)} <span class='mono peq muted'>{E(cl.get('modelo') or '')}</span></dd>",
+                 f"<dt>Razonamiento</dt><dd>{E(nombre_e)}</dd>"]
+        barras = ""
+        if llamadas:
+            primera, ultima = llamadas[0], llamadas[-1]
+            for k, nombre in consumo.VENTANAS.items():
+                antes, despues = (primera.get("antes") or {}).get(k), (ultima.get("despues") or {}).get(k)
+                if despues is not None and k in (t.get("delta") or {}):
+                    antes = max(0.0, despues - t["delta"][k])
+                reinicio = consumo.hora_reinicio((ultima.get("reinicio") or {}).get(k))
+                barras += V.barra_uso(f"Ventana {nombre}" if k == "five_hour" else "Límite semanal", antes, despues,
+                                      f"se reinicia {reinicio}" if reinicio else "")
+            tk = t.get("tokens") or {}
+            filas += [f"<dt>Llamadas</dt><dd>{len(llamadas)}"
+                      f"{' (análisis + reintento)' if len(llamadas) > 1 else ''}</dd>",
+                      f"<dt>Duración</dt><dd>{(t.get('duracion_s') or 0) / 60:.1f} min</dd>",
+                      f"<dt>Tokens</dt><dd class='peq'><span class='mono'>{tk.get('entrada', 0) + tk.get('cache_escritura', 0) + tk.get('cache_lectura', 0):,}</span> de entrada "
+                      f"(<span class='mono'>{tk.get('cache_lectura', 0):,}</span> de caché) · "
+                      f"<span class='mono'>{tk.get('salida', 0):,}</span> de salida</dd>".replace(",", "."),
+                      f"<dt>Si fuera por API</dt><dd><b class='mono'>{E(consumo.usd(t.get('coste_usd')))}</b>"
+                      f" <span class='muted peq'>no se cobra: va con tu plan</span></dd>"]
+        if est:
+            filas.append(f"<dt>Estimado antes</dt><dd class='peq'><span class='mono'>{E(consumo.usd(est.get('coste_usd')))}</span>"
+                         + "".join(f" · {nombre} +{consumo.pct(est['plan'][k]['delta'])}"
+                                   for k, nombre in (("five_hour", "5 h"), ("seven_day", "semana"))
+                                   if (est.get("plan") or {}).get(k, {}).get("delta") is not None) + "</dd>")
+        if not llamadas:
+            barras = ('<p class="muted" style="margin:0 0 12px">'
+                      + ("Claude está trabajando: el consumo real aparecerá al terminar."
+                         if p["estado"] in TRANSITORIOS else "No hay datos de consumo de esta ejecución.") + "</p>")
+        return V.tarjeta(barras + f'<dl class="dl" style="margin-top:16px">{"".join(filas)}</dl>',
+                         "Consumo de Claude", icono_nombre="pulso")
+
+    def _tarjeta_uso_plan(self) -> str:
+        """Estado actual del plan de Claude (última medición) y lo gastado por el vigilante."""
+        g = self.v.gestor.consumo
+        lim = g.limites()
+        hist = g.datos.get("historial") or []
+        if not hist and not lim["ventanas"]:
+            return ""
+        barras = "".join(
+            V.barra_uso("Ventana de 5 horas" if k == "five_hour" else "Límite semanal", None,
+                        (lim["ventanas"].get(k) or {}).get("uso"),
+                        ("reiniciada desde la última medición" if (lim["ventanas"].get(k) or {}).get("reiniciada") else
+                         f"se reinicia {consumo.hora_reinicio((lim['ventanas'].get(k) or {}).get('reinicio'))}"
+                         if (lim["ventanas"].get(k) or {}).get("reinicio") else ""))
+            for k in consumo.VENTANAS)
+        hace7 = (dt.datetime.now() - dt.timedelta(days=7)).isoformat(timespec="seconds")
+        semana = [h for h in hist if h.get("fecha", "") >= hace7]
+        coste7 = sum(h.get("coste_usd") or 0 for h in semana)
+        delta7 = sum((h.get("delta") or {}).get("seven_day", 0) for h in semana)
+        medido = (_hora(dt.datetime.fromtimestamp(lim["fecha"]).isoformat(timespec="seconds"))
+                  if lim.get("fecha") else "—")
+        resumen = (f'<dl class="dl" style="margin-top:16px"><dt>Últimos 7 días</dt><dd>{len(semana)} ejecución(es) · '
+                   f'+{consumo.pct(delta7)} del límite semanal</dd>'
+                   f'<dt>Si fuera por API</dt><dd><b class="mono">{E(consumo.usd(coste7))}</b> en 7 días · '
+                   f'<span class="mono">{E(consumo.usd(sum(h.get("coste_usd") or 0 for h in hist)))}</span> en total</dd>'
+                   f'<dt>Medido</dt><dd>{E(medido)} <span class="muted peq">(se actualiza con cada ejecución; '
+                   f'incluye tu uso de Claude fuera del vigilante)</span></dd></dl>')
+        return V.tarjeta(barras + resumen, "Uso de tu plan de Claude", icono_nombre="pulso")
 
     def correcciones(self, ctx):
         planes = self._datos(ctx)[2]
@@ -653,6 +797,7 @@ placeholder="Buscar CVE, componente o texto" aria-label="Buscar vulnerabilidades
                   'Entonces propone cambios concretos y los justifica uno a uno; el vigilante los prueba en una copia con contenedores de '
                   'prueba. Tú apruebas o rechazas cada cambio (o todos). Solo entonces se aplica, con copia de seguridad '
                   'y posibilidad de revertir.</p></div></div>')
+        cuerpo += self._tarjeta_uso_plan()
         return self.envolver("Correcciones", explic + cuerpo, "/correcciones", ctx,
                              subtitulo="Planes de corrección que has pedido a Claude",
                              acciones=self._boton_resolver_app(ctx),
@@ -720,6 +865,8 @@ Valora una versión posterior antes de aprobar.</p></div></div>''')
         # columna lateral: verificación, compatibilidad, aplicación, vulnerabilidades, registro
         lateral = [V.tarjeta(self._timeline(ver.get("pasos")) + self._deprecaciones(ver) + self._previas(p),
                              "Verificación en copia", V.estado_verif(ver.get("estado")), icono_nombre="capas")]
+        if p.get("claude"):
+            lateral.append(self._tarjeta_consumo(p))
         compat = []
         for clave in ("compatibilidad", "compatibilidad_objetivo"):
             for aviso in (p.get(clave) or {}).get("avisos", []):
@@ -945,32 +1092,42 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
     panel = Panel(vigilante)
     cfg_panel = vigilante.cfg["panel"]
     host = host or cfg_panel.get("host") or "0.0.0.0"
-    usuario, clave = cfg_panel.get("usuario") or "", cfg_panel.get("clave") or ""
     limite = LimiteIntentos()
+    limite_altas = LimiteIntentos()
+    cuenta = panel.cuenta
 
     class Manejador(BaseHTTPRequestHandler):
         def log_message(self, fmt, *a):
             log.debug("panel: " + fmt, *a)
 
-        # -------- contraseña de acceso (HTTP Basic) para todo el panel, si está configurada
-        def _basic_ok(self) -> bool:
-            if not clave:
-                return False
-            cab = self.headers.get("Authorization") or ""
-            if not cab.startswith("Basic "):
-                return False
-            try:
-                u, _, c = base64.b64decode(cab[6:]).decode().partition(":")
-            except ValueError:
-                return False
-            return hmac.compare_digest(u, usuario) and hmac.compare_digest(c, clave)
-
         def _ip(self) -> str:
-            return self.headers.get("CF-Connecting-IP") or self.client_address[0]
+            # la cabecera del túnel/proxy solo se cree si la conexión viene de la propia red (el proxy);
+            # si no, cualquiera podría cambiarla en cada intento y saltarse el bloqueo
+            directa = self.client_address[0]
+            try:
+                local = ipaddress.ip_address(directa).is_private or ipaddress.ip_address(directa).is_loopback
+            except ValueError:
+                local = False
+            return (self.headers.get("CF-Connecting-IP") if local else None) or directa
 
-        def _exigir_acceso(self) -> bool:
-            if not clave:
-                return True
+        # -------- sesión (cookie) o token de API (scripts)
+        def _sid(self) -> str:
+            return _cookie(self.headers, "pw_sesion")
+
+        def _sesion(self) -> dict | None:
+            return cuenta.sesion(self._sid())
+
+        def _https(self) -> bool:
+            return (self.headers.get("X-Forwarded-Proto") or "").lower() == "https" or \
+                '"https"' in (self.headers.get("CF-Visitor") or "")
+
+        def _cookie_sesion(self, sid: str, borrar=False) -> str:
+            seguro = "; Secure" if self._https() else ""
+            if borrar:
+                return f"pw_sesion=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0{seguro}"
+            return f"pw_sesion={sid}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200{seguro}"
+
+        def _bloqueado(self) -> bool:
             espera = limite.restante(self._ip())
             if espera:
                 cuerpo = f"Demasiados intentos. Prueba de nuevo en {espera} s.".encode()
@@ -979,34 +1136,45 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
                 self.send_header("Content-Length", str(len(cuerpo)))
                 self.end_headers()
                 self.wfile.write(cuerpo)
-                return False
-            if self._basic_ok():
-                limite.acierto(self._ip())
                 return True
-            if self.headers.get("Authorization"):       # credenciales dadas pero incorrectas
-                limite.fallo(self._ip())
-            cuerpo = b"Acceso restringido"
-            self.send_response(401)
-            self.send_header("WWW-Authenticate", 'Basic realm="Vigilante", charset="UTF-8"')
-            self.send_header("Content-Length", str(len(cuerpo)))
-            self.end_headers()
-            self.wfile.write(cuerpo)
             return False
 
-        def _mismo_origen(self) -> bool:
-            """Protección CSRF cuando la contraseña Basic sustituye al token."""
-            origen = self.headers.get("Origin") or self.headers.get("Referer") or ""
-            return bool(origen) and urllib.parse.urlparse(origen).netloc == self.headers.get("Host", "")
-
-        def _ctx(self, q=None):
+        def _ctx(self, q=None, ses=None):
             q = q or {}
-            pide_token = not clave and not panel.token_ok(_cookie(self.headers, "vigilante_token"))
             conocidas = panel._resumen_apps()
             app = urllib.parse.unquote(q["app"]) if "app" in q else urllib.parse.unquote(_cookie(self.headers, "vigilante_app"))
             app = app if app in conocidas else ""
             if "app" in q:
                 self._extra = [("Set-Cookie", f"vigilante_app={urllib.parse.quote(app)}; Path=/; SameSite=Strict; Max-Age=31536000")]
-            return {"msg": q.get("msg", ""), "pide_token": pide_token, "app": app}
+            return {"msg": q.get("msg", ""), "pide_token": False, "app": app,
+                    "csrf": (ses or {}).get("csrf", ""), "usuario": cuenta.usuario if ses else ""}
+
+        # -------- páginas de acceso
+        def _pagina_inicial(self, error="", codigo=201):
+            cuerpo = ('<form method="post" action="/configuracion-inicial">'
+                      '<label class="campo"><span>Código de configuración</span><input name="codigo" required '
+                      'autocomplete="off" spellcheck="false"><span class="ayuda">Está en el log del contenedor '
+                      '(<code>docker compose logs vigilante</code>) y en <code>codigo-inicial.txt</code> dentro de '
+                      'la carpeta de datos.</span></label>'
+                      '<label class="campo"><span>Usuario</span><input name="usuario" required autocomplete="username"></label>'
+                      '<label class="campo"><span>Contraseña</span><input type="password" name="clave" minlength="12" '
+                      'required autocomplete="new-password"><span class="ayuda">Al menos 12 caracteres.</span></label>'
+                      '<label class="campo"><span>Repite la contraseña</span><input type="password" name="clave2" '
+                      'minlength="12" required autocomplete="new-password"></label>'
+                      + V.boton("Crear la cuenta y entrar", "primario", "check") + '</form>')
+            self._enviar(200 if codigo == 201 else codigo, V.pagina_acceso(
+                "Crea tu cuenta", cuerpo, error,
+                "Es la única cuenta del panel. Solo quien tenga el código del log puede crearla."))
+
+        def _pagina_entrar(self, volver="/", error="", codigo=200):
+            cuerpo = (f'<form method="post" action="/entrar"><input type="hidden" name="volver" '
+                      f'value="{E(volver_seguro(volver), quote=True)}">'
+                      '<label class="campo"><span>Usuario</span><input name="usuario" required autofocus '
+                      'autocomplete="username"></label>'
+                      '<label class="campo"><span>Contraseña</span><input type="password" name="clave" required '
+                      'autocomplete="current-password"></label>'
+                      + V.boton("Entrar", "primario", "flecha") + '</form>')
+            self._enviar(codigo, V.pagina_acceso("Entrar", cuerpo, error))
 
         def _responder_ext(self, r):
             if r[0] == "redirigir":
@@ -1045,9 +1213,30 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
             q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query, keep_blank_values=True).items()}
             if ruta == "/salud":
                 return self._enviar(200, "ok", "text/plain")
-            if not self._exigir_acceso():
-                return
-            ctx = self._ctx(q)
+            if ruta.startswith("/api/agente/"):
+                return api_agente.get(self, ruta, vigilante.registro)
+            api = panel.token_ok(self.headers.get("X-Token", ""))
+            if not cuenta.existe() and not api:
+                if ruta == "/configuracion-inicial":
+                    return self._pagina_inicial()
+                return self._redirigir("/configuracion-inicial")
+            if ruta in ("/configuracion-inicial", "/entrar"):
+                if self._sesion() or not cuenta.existe():
+                    return self._redirigir("/")
+                if ruta == "/entrar":
+                    return self._pagina_entrar(q.get("volver", "/"))
+                return self._redirigir("/entrar")
+            ses = self._sesion()
+            if not ses and not api:
+                if ruta.startswith("/api/"):
+                    return self._enviar(401, json.dumps({"error": "sin sesión"}), "application/json")
+                return self._redirigir("/entrar?volver=" + urllib.parse.quote(self.path, safe=""))
+            ctx = self._ctx(q, ses)
+            if ruta == "/ajustes":
+                return self._redirigir("/ajustes/general")
+            if ruta.startswith("/ajustes/"):
+                p = panel_ajustes.pagina(panel, ctx, ruta.split("/")[2])
+                return self._enviar(200, p) if p else self._no_encontrado(ctx)
             if extension and ruta.startswith("/demo"):
                 return self._responder_ext(extension.get(self, ruta, q, panel, ctx))
             paginas = {"/": panel.inicio, "/vulnerabilidades": panel.vulnerabilidades,
@@ -1058,6 +1247,8 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
             if ruta == "/api/estado":
                 return self._enviar(200, json.dumps({**vigilante.estado, "mantenimiento": vigilante.mant.info()},
                                                     ensure_ascii=False), "application/json")
+            if ruta == "/api/claude/estimacion":
+                return self._enviar(200, json.dumps(panel.estimacion(q), ensure_ascii=False), "application/json")
             if ruta.startswith("/plan/"):
                 try:
                     p = panel.plan(ruta.split("/")[2], ctx)
@@ -1075,20 +1266,32 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
 
         def do_POST(self):
             ruta = urllib.parse.urlparse(self.path).path
-            largo = min(int(self.headers.get("Content-Length") or 0), 10_000)
-            form = {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(largo).decode()).items()}
-            if not self._exigir_acceso():
-                return
-            token = form.get("token") or self.headers.get("X-Token", "") or _cookie(self.headers, "vigilante_token")
-            con_basic = not token and self._basic_ok() and self._mismo_origen()
-            if not (panel.token_ok(token) or con_basic):
-                ctx = {"msg": "Token incorrecto o sin configurar (VIGILANTE_PANEL_TOKEN). No se ha hecho nada.",
-                       "pide_token": True}
-                return self._enviar(403, panel.mantenimiento(ctx) if ruta == "/api/mantenimiento" else
-                                    panel.envolver("Acceso denegado", V.tarjeta(V.vacio(
-                                        "Hace falta el token del panel para hacer cambios.", "candado")), "", ctx))
-            self._cookie = (f"vigilante_token={token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=43200"
-                            if token else None)
+            if ruta.startswith("/api/agente/"):
+                return api_agente.post(self, ruta, vigilante.registro, limite_altas, self._ip())
+            largo = min(int(self.headers.get("Content-Length") or 0), 20_000)
+            form = {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(largo).decode(),
+                                                               keep_blank_values=True).items()}
+            self._cookie = None
+            if ruta == "/configuracion-inicial":
+                return self._crear_cuenta(form)
+            if ruta == "/entrar":
+                return self._entrar(form)
+            ses = self._sesion()
+            if ses:
+                # CSRF: el formulario tiene que traer el token de ESTA sesión
+                if not hmac.compare_digest(form.get("csrf", ""), ses["csrf"]):
+                    ctx = self._ctx({"msg": "La página había caducado: vuelve a intentarlo. No se ha hecho nada."}, ses)
+                    return self._enviar(403, panel.envolver("Acción no válida", V.tarjeta(V.vacio(
+                        "La petición no venía de esta sesión del panel.", "candado")), "", ctx))
+            elif not panel.token_ok(form.get("token") or self.headers.get("X-Token", "")):
+                if ruta == "/salir":
+                    return self._redirigir("/entrar", self._cookie_sesion("", borrar=True))
+                return self._enviar(403, "Hace falta iniciar sesión (o el token de API).", "text/plain; charset=utf-8")
+            if ruta == "/salir":
+                cuenta.cerrar(self._sid())
+                return self._redirigir("/entrar", self._cookie_sesion("", borrar=True))
+            if ruta.startswith("/ajustes/"):
+                return self._accion_ajustes(ruta, form)
             if extension and ruta.startswith("/demo"):
                 return self._responder_ext(extension.post(self, ruta, form))
             if ruta.startswith("/api/plan/"):
@@ -1111,9 +1314,10 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
                 if form.get("confirmar") != "si":
                     msg = "Falta confirmar: no se ha pedido nada a Claude."
                 elif form.get("app"):
-                    msg = vigilante.gestor.solicitar_app(form["app"], por)
+                    msg = vigilante.gestor.solicitar_app(form["app"], por, form.get("modelo"), form.get("esfuerzo"))
                 else:
-                    msg = vigilante.gestor.solicitar_componente(form.get("clave", ""), por)
+                    msg = vigilante.gestor.solicitar_componente(form.get("clave", ""), por, form.get("modelo"),
+                                                                form.get("esfuerzo"))
                 return self._redirigir(f"/correcciones?msg={urllib.parse.quote(msg)}", self._cookie)
             if ruta == "/api/escanear":
                 if not vigilante.en_curso:
@@ -1122,6 +1326,96 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
                 volver = urllib.parse.urlparse(self.headers.get("Referer") or "/").path or "/"
                 return self._redirigir(f"{volver}?msg={urllib.parse.quote(msg)}", self._cookie)
             self._enviar(404, "No encontrado", "text/plain")
+
+        def _crear_cuenta(self, form):
+            if cuenta.existe():
+                return self._redirigir("/entrar")
+            if self._bloqueado():
+                return
+            if form.get("clave", "") != form.get("clave2", ""):
+                return self._pagina_inicial("Las dos contraseñas no coinciden.", 400)
+            try:
+                cuenta.crear(form.get("usuario", ""), form.get("clave", ""), codigo=form.get("codigo", ""))
+            except ErrorCuenta as e:
+                if "código" in str(e):
+                    limite.fallo(self._ip())
+                return self._pagina_inicial(str(e), 400)
+            limite.acierto(self._ip())
+            sid = cuenta.crear_sesion(self._ip(), self.headers.get("User-Agent", ""))
+            msg = urllib.parse.quote("Cuenta creada. Configura aquí los avisos (Telegram, email…).")
+            return self._redirigir(f"/ajustes/avisos?msg={msg}", self._cookie_sesion(sid))
+
+        def _entrar(self, form):
+            if not cuenta.existe():
+                return self._redirigir("/configuracion-inicial")
+            if self._bloqueado():
+                return
+            volver = volver_seguro(form.get("volver", "/"))
+            if not cuenta.comprobar(form.get("usuario", ""), form.get("clave", "")):
+                limite.fallo(self._ip())
+                log.warning("Intento de acceso fallido al panel desde %s", self._ip())
+                return self._pagina_entrar(volver, "Usuario o contraseña incorrectos.", 401)
+            limite.acierto(self._ip())
+            sid = cuenta.crear_sesion(self._ip(), self.headers.get("User-Agent", ""))
+            return self._redirigir(volver, self._cookie_sesion(sid))
+
+        def _accion_ajustes(self, ruta, form):
+            accion = ruta.split("/")[2] if ruta.count("/") >= 2 else ""
+            pestana = form.get("pestana", "general")
+            try:
+                if accion in ("guardar", "probar"):
+                    cambiados = panel.ajustes.guardar(pestana, form)
+                    if "general.nombre_web" in cambiados:
+                        vigilante.avisador.web = vigilante.cfg["general"]["nombre_web"]
+                    msg = (f"Guardado ({len(cambiados)} cambio(s)). Ya está en uso." if cambiados
+                           else "No había nada que cambiar.")
+                    if accion == "probar":
+                        canal = form.get("canal", "")
+                        if canal == "telegram":
+                            fallo = vigilante.gestor.bot.probar()
+                        elif canal in ("webhook", "email"):
+                            fallo = vigilante.avisador.probar(canal)
+                        else:
+                            fallo = "Canal desconocido."
+                        msg = (f"{msg} Prueba enviada por {canal}: comprueba que ha llegado." if not fallo
+                               else f"{msg} La prueba por {canal} falló: {fallo}")
+                elif accion == "clave":
+                    pestana = "cuenta"
+                    if form.get("nueva", "") != form.get("nueva2", ""):
+                        msg = "Las dos contraseñas nuevas no coinciden. No se ha cambiado nada."
+                    else:
+                        cuenta.cambiar_clave(form.get("actual", ""), form.get("nueva", ""), self._sid())
+                        msg = "Contraseña cambiada. Las demás sesiones se han cerrado."
+                elif accion == "equipo-alta":
+                    try:
+                        codigo = vigilante.registro.crear_alta(form.get("nombre", ""))
+                    except ErrorEquipo as e:
+                        return self._redirigir(f"/ajustes/equipos?msg={urllib.parse.quote(str(e))}")
+                    ctx = self._ctx({"msg": "Código creado: cópialo ahora, no se volverá a mostrar."}, self._sesion())
+                    ctx["url_base"] = f"{'https' if self._https() else 'http'}://{self.headers.get('Host', '')}"
+                    alta = {"nombre": form.get("nombre", "").strip().lower(), "codigo": codigo}
+                    return self._enviar(200, panel_ajustes.pagina(panel, ctx, "equipos", alta))
+                elif accion == "equipo-revocar":
+                    pestana = "equipos"
+                    if form.get("confirmar") != "si":
+                        msg = "Falta confirmar: no se ha revocado nada."
+                    else:
+                        try:
+                            vigilante.registro.revocar(form.get("id", ""))
+                            msg = "Equipo revocado: su agente ya no puede conectarse."
+                        except ErrorEquipo as e:
+                            msg = str(e)
+                elif accion == "sesiones":
+                    pestana = "cuenta"
+                    n = cuenta.cerrar_otras(self._sid())
+                    msg = f"Se han cerrado {n} sesión(es)."
+                else:
+                    return self._enviar(404, "No encontrado", "text/plain")
+            except (ErrorAjuste, ErrorCuenta) as e:
+                msg = f"No se ha guardado: {e}"
+            if pestana not in panel_ajustes.NOMBRES:
+                pestana = "general"
+            self._redirigir(f"/ajustes/{pestana}?msg={urllib.parse.quote(msg)}")
 
         def _accion_plan(self, ruta, form):
             partes = ruta.split("/")       # /api/plan/<id>/<accion>
@@ -1156,5 +1450,5 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
 
     srv = ThreadingHTTPServer((host, puerto), Manejador)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
-    log.info("Panel en http://%s:%d%s", host, puerto, " (con contraseña)" if clave else "")
+    log.info("Panel en http://%s:%d", host, puerto)
     return srv

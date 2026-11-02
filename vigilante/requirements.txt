@@ -1,1 +1,0 @@
-# Sin dependencias de Python: Claude se usa a través del binario de Claude Code (ver Dockerfile).

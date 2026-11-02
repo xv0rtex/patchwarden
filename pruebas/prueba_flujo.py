@@ -4,12 +4,15 @@ Usa: Docker simulado (docker_falso.py), API de Claude simulada en streaming, Bot
 Telegram simulada y una «web» local. NVD/OSV/KEV/EPSS y los registros de paquetes son reales.
 
     python3 pruebas/prueba_flujo.py
+    PRUEBA_AGENTE=1 python3 pruebas/prueba_flujo.py   # lo mismo con panel central + agente (por HTTP)
 """
+import copy
 import hashlib
 import json
 import os
 import shutil
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -21,9 +24,11 @@ sys.path.insert(0, AQUI)
 import apis_falsas  # noqa: E402
 import docker_falso  # noqa: E402
 
-TMP = "/tmp/vig-flujo"
+CON_AGENTE = os.environ.get("PRUEBA_AGENTE") == "1"
+TMP = "/tmp/vig-flujo-agente" if CON_AGENTE else "/tmp/vig-flujo"
+APP = "srv2/ejemplo" if CON_AGENTE else "ejemplo"      # las apps de un equipo remoto llevan su nombre delante
 PROYECTO = os.path.join(TMP, "proyecto")
-PUERTO_PANEL = 8097
+PUERTO_PANEL = 8098 if CON_AGENTE else 8097
 resultados = []
 
 
@@ -55,6 +60,18 @@ def post_panel(ruta, datos):
             return f"HTTP {e.code}"
         return urllib.parse.unquote(e.headers.get("Location", "").split("msg=")[-1])
     return ""
+
+
+def get_panel(ruta):
+    req = urllib.request.Request(f"http://127.0.0.1:{PUERTO_PANEL}{ruta}", headers={"X-Token": "secreto"})
+    return urllib.request.urlopen(req).read().decode()
+
+
+def esperar_hasta(cond, segundos):
+    fin = time.time() + segundos
+    while time.time() < fin and not cond():
+        time.sleep(0.2)
+    return cond()
 
 
 def leer(ruta):
@@ -96,16 +113,44 @@ def main():
     cfg["panel"].update(token="secreto", url_publica=f"http://127.0.0.1:{PUERTO_PANEL}")
     cfg["mantenimiento"].update(carpeta=os.path.join(TMP, "mant"))
 
+    agente = None
+    if CON_AGENTE:
+        # el agente se queda con todo lo del servidor; el central no ve Docker ni el código
+        cfg_agente = copy.deepcopy(cfg)
+        cfg_agente["general"]["carpeta_datos"] = os.path.join(TMP, "datos-agente")
+        cfg_agente["central"].update(url=f"http://127.0.0.1:{PUERTO_PANEL}")
+        cfg["deteccion"].update(docker=False, rutas_proyecto=[], apps={})
+        cfg["mantenimiento"].update(carpeta=os.path.join(TMP, "mant-central"))
     v = Vigilante(cfg)
     v.gestor.arrancar_bot()
     panel.arrancar(v, PUERTO_PANEL)
     antes = huella(PROYECTO)
+    if CON_AGENTE:
+        from vigilante.agente import Agente
+        print("\n0) Alta del agente en el central")
+        codigo = v.registro.crear_alta("srv2")
+        agente = Agente(cfg_agente)
+        agente.dar_de_alta(codigo)
+        threading.Thread(target=agente.ejecutar, daemon=True).start()
+        esperar_hasta(lambda: any((e.get("inventario") or {}).get("componentes") for e in v.registro.activos().values()), 30)
+        ok(len(v.registro.activos()) == 1 and v.registro.en_linea(agente.estado["id"]), "el agente se da de alta y está en línea")
+        cfg_otro = copy.deepcopy(cfg_agente)
+        cfg_otro["general"]["carpeta_datos"] = os.path.join(TMP, "datos-otro")
+        try:
+            Agente(cfg_otro).dar_de_alta(codigo)
+            ok(False, "el código de alta no se puede usar dos veces")
+        except Exception as e:  # noqa: BLE001
+            ok("403" in str(e), "el código de alta no se puede usar dos veces")
 
     print("\n1) Ciclo: sin pedirlo, Claude NO hace nada; solo se le OFRECE al usuario")
     t = time.time()
     v.ciclo("prueba")
     v.gestor.cola.join()
     print(f"   ({time.time() - t:.0f} s)")
+    if CON_AGENTE:
+        comps = v.estado["componentes"]
+        ok(comps and all(c.get("equipo") == agente.estado["id"] and c["app"].startswith("srv2") for c in comps),
+           f"todo lo detectado viene del agente y lleva su equipo ({len(comps)} componentes)")
     ok(not claude.peticiones, "REGLA: tras el análisis no se ha llamado a Claude ni una vez")
     ok(not v.gestor.planes.todos(), "REGLA: no se ha creado ningún plan por su cuenta")
     ofertas = [i for i in tg.orden if "¿Quieres que Claude prepare una corrección?" in tg.mensajes[i]["text"]]
@@ -132,8 +177,8 @@ def main():
     v.gestor.cola.join()
     planes = {p["componente"]["nombre"]: p for p in v.gestor.planes.todos()}
     ok(set(planes) == {"php", "twig/twig"}, f"planes creados para php y twig: {sorted(planes)}")
-    ok({p["componente"]["app"] for p in planes.values()} == {"ejemplo"}, "cada plan sabe a qué app pertenece (ejemplo)")
-    ok(all(h["app"] == "ejemplo" for h in v.estado["hallazgos"].values() if h["nombre"] in ("php", "twig/twig")),
+    ok({p["componente"]["app"] for p in planes.values()} == {APP}, f"cada plan sabe a qué app pertenece ({APP})")
+    ok(all(h["app"] == APP for h in v.estado["hallazgos"].values() if h["nombre"] in ("php", "twig/twig")),
        "las vulnerabilidades llevan su app")
     ok(all(p["estado"] == "pendiente_aprobacion" for p in planes.values()), "los dos esperan aprobación")
     ok(huella(PROYECTO) == antes, "REGLA: el proyecto NO se ha tocado sin aprobación")
@@ -143,7 +188,7 @@ def main():
     args = pet["args"]
     opcion = lambda nombre: args[args.index(nombre) + 1]
     ok(args[0] == "-p" and opcion("--model") == "claude-opus-5-5", "Claude Code sin interfaz (-p), modelo claude-opus-5-5")
-    ok(opcion("--output-format") == "json" and "cambios" in json.loads(opcion("--json-schema"))["properties"],
+    ok(opcion("--output-format") == "stream-json" and "cambios" in json.loads(opcion("--json-schema"))["properties"],
        "salida estructurada con esquema JSON")
     ok(opcion("--tools") == "WebSearch,WebFetch" and opcion("--allowedTools") == "WebSearch,WebFetch",
        "solo puede leer changelogs (WebSearch/WebFetch): sin terminal ni ficheros")
@@ -152,6 +197,8 @@ def main():
     texto = pet["entrada"]
     ok("Revisión automática de compatibilidad" in texto and '"php": "8.1.2"' in texto,
        "recibe la revisión automática de compatibilidad y las versiones desplegadas")
+    ok('<fichero ruta="web/app/Dockerfile">' in texto and ".env" not in texto.split("## Ficheros del proyecto")[1].split("<fichero ruta=")[0],
+       "recibe los ficheros del proyecto" + (" (subidos por el agente)" if CON_AGENTE else ""))
 
     php, twig = planes["php"], planes["twig/twig"]
     print("\n3) Verificación en copia + contenedores de prueba")
@@ -175,7 +222,7 @@ def main():
     ok(not restos, "no quedan contenedores de prueba")
 
     print("\n4) Telegram: un mensaje por plan y por cambio, con botones")
-    cab = tg.buscar("Propuesta de corrección · ejemplo · php")
+    cab = tg.buscar(f"Propuesta de corrección · {APP} · php")
     ok(len(cab) == 1 and "No se aplicará nada sin tu aprobación" in tg.mensajes[cab[0]]["text"], "cabecera del plan php")
     m1 = tg.buscar("Cambio 1/2 · Imagen base")[0]
     m2 = tg.buscar("Cambio 2/2 · Ocultar")[0]
@@ -253,20 +300,54 @@ def main():
        "y vuelve a quedar pendiente de aprobación sin tocar nada")
 
     print("\n9b) Resolver una app entera a petición, y componentes donde Claude no propone cambios")
-    msg = v.gestor.solicitar_app("ejemplo", "prueba")
+    msg = v.gestor.solicitar_app(APP, "prueba")
     v.gestor.cola.join()
     ok("Claude está preparando" in msg, f"solicitar_app: {msg[:70]}")
     estados = {p["estado"] for p in v.gestor.planes.todos()}
     ok("sin_cambios" in estados, "si Claude no propone cambios queda «sin_cambios» (sin verificar ni pedir decisión)")
 
+    if CON_AGENTE:
+        print("\n9c) Defensas del agente: no se fía a ciegas del central")
+        pa = v.gestor.planes.obtener(twig["id"])
+        pa = {**pa, "estado": "pendiente_aprobacion"}
+        malo = copy.deepcopy(pa)
+        malo["verificacion"]["por_cambio"]["1"]["diff_final"] = "diff --git a/x b/x\n"
+        try:
+            agente.atender({"tipo": "aplicar", "datos": {"plan": malo, "por": "prueba"}})
+            ok(False, "rechaza aplicar una verificación manipulada")
+        except Exception as e:  # noqa: BLE001
+            ok("no es una que haya hecho este equipo" in str(e), "rechaza aplicar una verificación que no hizo él")
+        try:
+            agente.atender({"tipo": "contexto", "datos": {"raiz": "/etc", "paquete": "x"}})
+            ok(False, "rechaza leer carpetas que no son proyectos")
+        except Exception as e:  # noqa: BLE001
+            ok("no es un proyecto vigilado" in str(e), "rechaza leer carpetas que no son proyectos (/etc)")
+        try:
+            agente.atender({"tipo": "verificar", "datos": {"plan": {**pa, "id": "../../x"}}})
+            ok(False, "rechaza ids de plan con rutas")
+        except Exception as e:  # noqa: BLE001
+            ok("plan no válido" in str(e), "rechaza ids de plan que no son alfanuméricos")
+        falso = {**pa, "id": "noaplicado", "aplicacion": {"respaldo": {"carpeta": "/etc"}}}
+        try:
+            agente.atender({"tipo": "revertir", "datos": {"plan": falso}})
+            ok(False, "no revierte con un respaldo que no es suyo")
+        except Exception as e:  # noqa: BLE001
+            ok("ninguna aplicación" in str(e), "no revierte con una copia de seguridad que le diga el central")
+
+        print("\n9d) Revocar el equipo")
+        v.registro.revocar(agente.estado["id"])
+        esperar_hasta(lambda: agente.parar.is_set(), 70)
+        ok(agente.parar.is_set() and agente.revocado, "el agente recibe 401 y se detiene")
+        ok(set(v.equipos) == {""}, "el equipo desaparece del central")
+
     print("\n10) Panel")
-    html = urllib.request.urlopen(f"http://127.0.0.1:{PUERTO_PANEL}/plan/{php['id']}").read().decode()
+    html = get_panel(f"/plan/{php['id']}")
     ok("Por qué es correcto" in html and "Registro (auditoría)" in html and "Cambios en el código (verificados)" in html,
        "la página del plan muestra justificación, diffs, verificación y auditoría")
     with open(os.path.join(TMP, "plan_php.html"), "w") as f:
         f.write(html)
     with open(os.path.join(TMP, "plan_twig.html"), "w") as f:
-        f.write(urllib.request.urlopen(f"http://127.0.0.1:{PUERTO_PANEL}/plan/{twig['id']}").read().decode())
+        f.write(get_panel(f"/plan/{twig['id']}"))
     with open(os.path.join(TMP, "telegram.json"), "w") as f:
         json.dump([tg.mensajes[i] for i in tg.orden], f, ensure_ascii=False, indent=1)
     time.sleep(1)   # dejar terminar el re-escaneo lanzado tras aplicar/revertir

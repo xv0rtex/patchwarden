@@ -98,13 +98,18 @@ DEFECTO = {
         "webhook": "",                  # alternativa: URL a la que hacer POST al activar
         "solo_kev_o_epss": True,        # en auto, exigir además KEV o EPSS alto (evita falsas alarmas)
     },
+    "central": {                        # solo para el AGENTE (python -m vigilante --agente)
+        "url": "",                      # https://panel-central.ejemplo
+        "codigo": "",                   # código de alta de un solo uso (Ajustes › Equipos en el central)
+        "permitir_http": False,         # http:// solo con localhost, salvo que se permita aquí (p. ej. en una VPN)
+    },
     "panel": {
         "activo": True,
         "puerto": 8080,
-        "token": "",                    # obligatorio para acciones (activar/desactivar mantenimiento)
+        "token": "",                    # opcional: token de API para scripts (cabecera X-Token); el panel usa login
         "host": "0.0.0.0",              # 127.0.0.1 si solo se accede a través de un túnel/proxy
-        "usuario": "",                  # contraseña de acceso a TODO el panel (HTTP Basic);
-        "clave": "",                    # recomendable si el panel es accesible desde fuera
+        "usuario": "",                  # si se dan, la cuenta del panel se crea con ellos en el primer arranque;
+        "clave": "",                    # si no, se crea desde /configuracion-inicial con el código del log
         "url_publica": "",              # para enlaces en los avisos, p. ej. http://192.168.1.10:8080
     },
 }
@@ -139,6 +144,9 @@ ENTORNO = {
     "VIGILANTE_PANEL_PUERTO": ("panel", "puerto"),
     "VIGILANTE_PANEL_USUARIO": ("panel", "usuario"),
     "VIGILANTE_PANEL_CLAVE": ("panel", "clave"),
+    "VIGILANTE_CENTRAL": ("central", "url"),
+    "VIGILANTE_CODIGO": ("central", "codigo"),
+    "VIGILANTE_CENTRAL_PERMITIR_HTTP": ("central", "permitir_http"),
 }
 
 
@@ -163,6 +171,10 @@ def cargar(ruta: str | None = None) -> dict:
         for seccion, valores in fichero.items():
             if isinstance(valores, dict):
                 cfg.setdefault(seccion, {}).update(valores)
+    # lo cambiado desde Ajustes en el panel va encima del fichero; las variables de entorno, encima de todo
+    from .ajustes import aplicar_guardados
+    datos = os.environ.get("VIGILANTE_DATOS") or cfg["general"]["carpeta_datos"]
+    aplicar_guardados(cfg, os.path.join(datos, "ajustes.json"))
     for var, (sec, clave) in ENTORNO.items():
         if os.environ.get(var):
             cfg[sec][clave] = _convertir(os.environ[var], DEFECTO[sec][clave])

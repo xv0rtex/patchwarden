@@ -187,7 +187,7 @@ def es_del_vigilante(c: dict, todos: list[dict]) -> bool:
     yo = socket.gethostname()
     propio = next((x for x in todos if x["Id"].startswith(yo)), None)
     etiquetas = c.get("Labels") or {}
-    proyectos = {"vigilante"}
+    proyectos = {"vigilante", "vigilante-agente"}
     if propio:
         proyectos.add((propio.get("Labels") or {}).get("com.docker.compose.project"))
     return (c is propio or etiquetas.get("vigilante.ignorar") == "true"

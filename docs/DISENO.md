@@ -81,7 +81,7 @@ NVD arrastra retrasos de análisis desde 2024: OSV suele tener antes los avisos 
 **Por qué no Trivy/Grype en esta primera versión.** Son excelentes para escanear imágenes
 enteras, incluidos los paquetes del sistema operativo, pero pesan cientos de MB de base de datos y
 dan mucho ruido. Para este caso de uso (qué versión de PHP/Java/dependencias tiene *mi web*) basta
-con las APIs anteriores. Se pueden integrar más adelante como «capa F» (ver §9).
+con las APIs anteriores. Se pueden integrar más adelante como «capa F» (ver §10).
 
 # 4. Cómo se decide qué es crítico
 
@@ -200,6 +200,18 @@ corre en una carpeta vacía y solo con `WebSearch` y `WebFetch`, sin terminal ni
 CVE, los ficheros y las páginas web se le marcan como **datos, no instrucciones** (protección
 contra inyección de instrucciones). Aun así, nada de lo que diga Claude se ejecuta fuera de la
 lista blanca de §6.4.
+
+**Modelo, razonamiento y consumo.** Por defecto se usan `[claude] modelo` y `esfuerzo`, pero al pedir
+una corrección desde el panel se puede elegir otro modelo (Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1)
+y otro nivel de razonamiento (`--effort`: low…max). El diálogo muestra antes una estimación: el
+porcentaje que gastará de la ventana de 5 horas y del límite semanal del plan, y lo que costaría por
+API. `claude -p` se ejecuta con `--output-format stream-json`, que trae los eventos `rate_limit_event`
+(uso de cada ventana y hora de reinicio) y, al final, tokens y `total_cost_usd` (precio de lista; no
+se cobra). `consumo.py` guarda el último estado de las ventanas y un historial de ejecuciones en
+`/datos/consumo_claude.json`; cada plan guarda sus llamadas en `plan["claude"]`. Las estimaciones
+salen del historial (mismo modelo y razonamiento, escalado por tamaño de la petición) y, sin
+historial, de un cálculo aproximado por tokens. Los porcentajes son aproximados: el servidor los
+redondea al 1 % y una ventana incluye el uso de Claude que se haga fuera del vigilante.
 
 ## 6.3 Revisión de compatibilidad: automática y por Claude
 
@@ -379,6 +391,32 @@ el binario de Claude Code solo hace falta para las propuestas. Unas 4.000 línea
 | `telegram.py` | bot con botones, solo chat y usuarios autorizados, confirmaciones |
 | `correcciones.py` | orquesta el flujo; panel y Telegram usan las mismas funciones |
 | `panel.py` | panel web: estado, planes con diffs y justificación, aprobar, rechazar, aplicar y revertir |
+| `agente.py` | agente de un servidor: solo conexiones salientes al central, detecta, verifica y aplica en local |
+| `equipos.py` / `equipos_remotos.py` | interfaz `Equipo` (local y remoto), registro de agentes, tareas por long-poll (§9) |
+| `api_agente.py` | rutas `/api/agente/*` del central (alta, inventario, tareas, resultados) |
+| `usuarios.py` | cuenta única, scrypt, sesiones y CSRF (§9.4) |
+| `ajustes.py` / `panel_ajustes.py` | ajustes editables desde el panel y su página (§9.5) |
+| `instalar.py` | descubre las apps de Docker y genera la configuración del central o del agente |
+
+**Instalación y actualización.** El repositorio separa las dos piezas que se despliegan: `central/`
+(imagen del panel, con Claude Code) y `agente/` (imagen del cliente de cada servidor, sin panel ni
+Claude Code). Las dos se construyen desde la raíz con el código común de `vigilante/`. `instalar.sh`
+muestra un menú. Si no hay nada instalado, pregunta qué instalar. Si ya hay algo instalado, ofrece:
+
+- **Actualizar**: trae lo nuevo de GitHub (`git fetch` + `reset` en `<carpeta>/fuente`), reconstruye y
+  hace `docker compose up -d`. No vuelve a descubrir las apps ni a pedir datos. Conserva `.env`
+  (contraseña, tokens, URL y código del central), `vigilante.toml` y el volumen de datos: análisis,
+  caché, cuenta, planes, consumo y alta del agente. Antes guarda la imagen en marcha como
+  `:anterior`. Si la nueva no arranca (el panel no responde en `/salud`, o el agente se reinicia),
+  vuelve a ella.
+- **Actualizar y volver a buscar apps**: lo mismo, y además regenera la configuración con las
+  opciones guardadas en `instalacion.conf`.
+- **Cambiar tokens**, **parar o arrancar** y **desinstalar**. Desinstalar pide escribir «borrar»,
+  porque borra el volumen de datos.
+
+Cada instalación deja una copia de `instalar.sh` en su carpeta. Esa copia actúa sobre su propia
+instalación. Al arrancar, si el último análisis es más reciente que `intervalo_horas` y en el
+servidor se detecta exactamente lo mismo, no se repite: el siguiente ciclo espera lo que falta.
 
 **Panel web** (sin dependencias externas, modo claro y oscuro, adaptado a móvil, sin emoticonos;
 los estados se muestran con iconos SVG y texto, nunca solo con color):
@@ -435,7 +473,97 @@ Docker):
   - un análisis completo con Claude Code real dentro del contenedor;
   - probarlo con un Docker y un bot de Telegram reales.
 
-# 9. Limitaciones conocidas y siguientes pasos
+# 9. Panel central, agentes, cuenta y ajustes
+
+Un único panel central vigila varios servidores. En cada servidor con Docker corre un **agente**:
+detecta, verifica y aplica en su servidor. El central busca las vulnerabilidades, avisa, guarda los
+planes, pide las correcciones a Claude y muestra el panel. El modo todo en uno sigue existiendo: es el
+central con un «equipo local» en el mismo proceso.
+
+## 9.1 Equipos
+
+Todo lo que toca un servidor pasa por un `Equipo` (`equipos.py`):
+
+| Operación | `EquipoLocal` (este servidor) | `EquipoRemoto` (servidor con agente) |
+|---|---|---|
+| detectar | capas A–E de §2 | último inventario del agente (pide uno nuevo si está en línea) |
+| carpeta del proyecto | `rutas_proyecto` | la que manda el agente con cada componente |
+| ficheros para Claude | `claude.contexto_ficheros` | tarea `contexto` (máx. 2 MB) |
+| verificar / aplicar / revertir | `Verificador` / `Aplicador` | tareas `verificar` / `aplicar` / `revertir` |
+| mantenimiento | bandera en `/mantenimiento` | tarea `mantenimiento` |
+
+Cada componente lleva su `equipo`. La clave queda como `<equipo>~<app>::<componente>` y las apps de un
+equipo remoto se muestran como `nombre-del-equipo/app`, así que dos servidores con una app del mismo
+nombre no se mezclan. Un equipo solo puede devolver al plan tres campos: `verificacion`,
+`verificaciones_previas` y `aplicacion`.
+
+## 9.2 Protocolo
+
+Solo hay conexiones salientes del agente al central: no hay que abrir puertos en los servidores.
+Los mensajes son JSON sobre HTTPS. Se admite `http://` solo para `localhost`, o si se pone
+`[central] permitir_http = true` (por ejemplo, dentro de una VPN).
+
+| Petición | Autenticación | Para qué |
+|---|---|---|
+| `POST /api/agente/alta` | código de alta | canjea el código por `{id, token}` |
+| `POST /api/agente/inventario` | `Bearer <token>` | componentes, carpetas, capacidades, `solo_lectura`, mantenimiento |
+| `GET /api/agente/tareas` | `Bearer <token>` | long-poll de ~25 s; devuelve las tareas pendientes |
+| `POST /api/agente/resultado/<tarea>` | `Bearer <token>` | `{ok, resultado}` o `{ok: false, error}` |
+
+- El **código de alta** se crea en *Ajustes › Equipos*. Es de un solo uso, caduca en 1 h y en disco
+  solo se guarda su hash. Los fallos al canjearlo cuentan para el bloqueo por IP.
+- El **token** de cada agente se guarda solo como hash (`equipos.json`, 0600). Al **revocar** un
+  equipo, su token deja de valer al momento: el long-poll se despierta, el agente recibe un 401 y se
+  detiene con código de salida 3.
+- Un equipo está **en línea** si ha contactado en los últimos 75 s. Si el central pide algo a un
+  equipo desconectado, falla enseguida («equipo desconectado»), sin esperar.
+
+## 9.3 Qué no puede hacer un central comprometido
+
+El agente no se fía a ciegas del central:
+
+1. **Solo aplica lo que verificó él.** Tras cada verificación guarda una huella
+   (`huella_verificacion`: diffs finales, ficheros, «aplica» y hashes de producción). Si `aplicar`
+   llega con otra huella, lo rechaza.
+2. **Revierte con su propia copia de seguridad**: usa la que guardó él al aplicar, no la ruta que
+   mande el central.
+3. **Solo toca sus proyectos.** La carpeta tiene que ser una de sus `rutas_proyecto`, para leer
+   ficheros y para verificar, aplicar o revertir. El id del plan tiene que ser alfanumérico, porque se
+   usa en rutas.
+4. **Solo respalda imágenes de contenedores que él mismo ha detectado.**
+5. **`[aplicacion] solo_lectura` es local**: el central no puede saltárselo.
+6. **Los comandos de verificación siguen con la lista blanca** de `verificacion.comando_seguro`.
+
+Lo que sí puede hacer un central comprometido: ver los ficheros de despliegue que se envían a Claude
+y proponer cambios. Esos cambios solo se aplican si pasan la verificación en ese equipo y alguien
+pulsa «Aplicar». Para un equipo crítico conviene dejar el agente en `solo_lectura` y desplegar por
+CI/CD (§6.7).
+
+## 9.4 Cuenta y sesiones
+
+- **Una única cuenta.** En el primer arranque, `/configuracion-inicial` pide un código de un solo
+  uso. Ese código sale en el log y en `codigo-inicial.txt`, para que no se quede el panel quien llegue
+  antes. Si `[panel] usuario/clave` vienen en la configuración, la cuenta se crea con ellos.
+- **La contraseña** se guarda con scrypt (n=2^14) y sal, y tiene al menos 12 caracteres.
+- **Sesiones** con cookie `HttpOnly; SameSite=Strict` (y `Secure` detrás de HTTPS) que duran 12 h.
+  En disco solo se guarda el hash. Cambiar la contraseña cierra las demás sesiones.
+- **CSRF:** cada formulario POST lleva el token de su sesión. `[panel] token` queda como token de
+  API para scripts (cabecera `X-Token`).
+- **Bloqueo:** tras 10 intentos fallidos, la IP queda bloqueada 5 minutos. `CF-Connecting-IP` solo se
+  cree si la conexión llega de la red local (el túnel o proxy); si no, cualquiera podría cambiarla en
+  cada intento.
+
+## 9.5 Ajustes
+
+*Ajustes* tiene estas pestañas: General, Avisos (con «Guardar y enviar prueba» por canal), Claude,
+Consumo (uso del plan y cada ejecución), Reglas, Equipos y Cuenta. Lo que se cambia se guarda en
+`ajustes.json` (0600) y se aplica en caliente: el bot de Telegram lee su configuración en cada uso.
+
+El orden de precedencia es `DEFECTO` ← `vigilante.toml` ← `ajustes.json` ← variables de entorno.
+Un campo fijado por una variable de entorno aparece bloqueado. Los secretos nunca vuelven al
+navegador.
+
+# 10. Limitaciones conocidas y siguientes pasos
 
 1. **Backports de distribuciones**: si nginx viene de un paquete de Debian/Ubuntu (no de la
    imagen oficial), la versión «1.18.0» puede tener parches aplicados y NVD dará falsos
@@ -448,7 +576,8 @@ Docker):
 5. **Tests del propio proyecto** en la verificación (`composer test`, `npm test`), además de las
    pruebas de humo, si el proyecto los tiene.
 6. **Ventana de mantenimiento**: dejar aprobado un cambio para que se aplique a una hora concreta.
-7. **Varias webs** desde un solo vigilante y página de estado agregada.
+7. **Mantenimiento de equipos remotos desde el panel**: el agente ya sabe activarlo, pero la página
+   Mantenimiento y el modo automático solo actúan sobre el servidor del panel.
 8. **VEX / justificación**: marcar «no afecta porque no usamos esa función» desde el panel en
    lugar de editar la lista `ignorar`.
 9. Probar el `docker compose` completo en un servidor real con Docker.

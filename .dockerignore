@@ -1,0 +1,11 @@
+.git
+**/__pycache__
+**/*.pyc
+**/.env
+*.zip
+.DS_Store
+assets
+demo
+docs
+ejemplo
+pruebas

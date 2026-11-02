@@ -12,6 +12,8 @@ import html
 import re
 import urllib.parse
 
+from . import consumo
+
 E = html.escape
 
 # ------------------------------------------------------------------ iconos (24x24, trazo)
@@ -46,6 +48,9 @@ _I = {
     "punto": ['M12 10.5a1.5 1.5 0 1 0 0 3 1.5 1.5 0 1 0 0-3z'],
     "enviar": ['M4 12l16-7-6 16-3-7-7-2z'],
     "menos": ['M6 12h12'],
+    "ajustes": ['M4 7h9', 'M17 7h3', 'M15 5v4', 'M4 17h3', 'M11 17h9', 'M9 15v4'],
+    "salir": ['M14 4h5v16h-5', 'M10 8l-4 4 4 4', 'M6 12h10'],
+    "usuario": ['M12 4a4 4 0 1 0 0 8 4 4 0 1 0 0-8z', 'M4.5 20a7.5 7.5 0 0 1 15 0'],
 }
 
 
@@ -213,18 +218,18 @@ def leyenda_gravedad() -> str:
 # ------------------------------------------------------------------ página
 NAV = [("/", "Resumen", "resumen"), ("/vulnerabilidades", "Vulnerabilidades", "alerta"),
        ("/componentes", "Componentes", "caja"), ("/correcciones", "Correcciones", "llave"),
-       ("/mantenimiento", "Mantenimiento", "power")]
+       ("/mantenimiento", "Mantenimiento", "power"), ("/ajustes", "Ajustes", "ajustes")]
 
 
 def pagina(titulo: str, cuerpo: str, *, activo: str = "/", web: str = "", subtitulo: str = "",
            acciones: str = "", aviso: str = "", toast: str = "", badges: dict | None = None,
            extra_nav: list | None = None, refrescar: int = 0, dialogo_token: bool = False,
-           selector: str = "") -> str:
+           selector: str = "", usuario: str = "") -> str:
     badges = badges or {}
     nav = []
     for href, nombre, ic in NAV + (extra_nav or []):
         b = f'<span class="nb">{badges[href]}</span>' if badges.get(href) else ""
-        clase = "act" if href == activo else ""
+        clase = "act" if href == activo or (href != "/" and activo.startswith(href + "/")) else ""
         nav.append(f'<a class="{clase}" href="{href}">{icono(ic, 18)}<span>{E(nombre)}</span>{b}</a>')
     meta = f'<meta http-equiv="refresh" content="{refrescar}">' if refrescar else ""
     t = (f'<div class="toast" role="status">{icono("info", 18)}<span>{E(toast)}</span>'
@@ -239,17 +244,61 @@ def pagina(titulo: str, cuerpo: str, *, activo: str = "/", web: str = "", subtit
 <aside class="side"><a class="marca" href="/">{LOGO_SVG.format(t=30)}<span><b>Patchwarden</b><small>{E(web)}</small></span></a>
 <nav>{''.join(nav)}</nav>
 <button type="button" class="tema" id="tema" aria-label="Cambiar entre tema claro y oscuro">{icono("sol", 16, "t-sol")}{icono("luna", 16, "t-luna")}<span>Tema</span></button>
-<div class="side-pie">{icono("candado", 14)}<span>Nada se aplica sin tu aprobación</span></div></aside>
+{pie_usuario(usuario)}<div class="side-pie">{icono("candado", 14)}<span>Nada se aplica sin tu aprobación</span></div></aside>
 <div class="main">{aviso}
 <header class="top"><div><h1>{E(titulo)}</h1>{f'<p>{subtitulo}</p>' if subtitulo else ''}</div>
 <div class="top-x">{selector}{acciones}</div></header>
 <main class="cont">{cuerpo}</main></div></div>
 {t}<div class="tip" id="tip" hidden></div>
 <dialog id="dlg"><form method="dialog" class="dlg-c"><div class="dlg-i">{icono("alerta", 22)}</div>
-<h3 id="dlg-t">¿Confirmas?</h3><p id="dlg-m"></p>{token}
+<h3 id="dlg-t">¿Confirmas?</h3><p id="dlg-m"></p>{DLG_CLAUDE}{token}
 <div class="dlg-b"><button class="btn btn-secundario" value="no">Cancelar</button>
 <button class="btn btn-primario" value="si" id="dlg-ok">Confirmar</button></div></form></dialog>
 <script>{JS}</script></body></html>"""
+
+
+def pie_usuario(usuario: str) -> str:
+    if not usuario:
+        return ""
+    return (f'<div class="side-user">{icono("usuario", 16)}<span title="{E(usuario, quote=True)}">{E(usuario)}</span>'
+            f'<form method="post" action="/salir"><button class="salir" aria-label="Cerrar sesión" title="Cerrar sesión">'
+            f'{icono("salir", 16)}</button></form></div>')
+
+
+def pagina_acceso(titulo: str, cuerpo: str, error: str = "", nota: str = "") -> str:
+    """Página sin menú (entrar / crear la cuenta)."""
+    err = (f'<div class="banner banner-mal" role="alert">{icono("alerta", 18)}<div><p>{E(error)}</p></div></div>'
+           if error else "")
+    return f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<script>try{{var t=localStorage.getItem("pw-tema");if(t)document.documentElement.dataset.theme=t}}catch(e){{}}</script>
+<title>{E(titulo)} · Patchwarden</title><link rel="icon" href="{FAVICON}"><style>{CSS}</style></head>
+<body><main class="acceso"><div class="acceso-c">
+<div class="acceso-m">{LOGO_SVG.format(t=40)}<b>Patchwarden</b></div>
+<h1>{E(titulo)}</h1>{f'<p class="muted">{nota}</p>' if nota else ''}{err}{cuerpo}</div></main></body></html>"""
+
+
+DLG_CLAUDE = ('<div id="dlg-claude" class="dlg-claude" hidden><div class="dlg-sel">'
+              '<label class="campo"><span>Modelo</span><select id="dlg-modelo">'
+              + "".join(f'<option value="{m[0]}">{m[1]}</option>' for m in consumo.MODELOS)
+              + '</select></label><label class="campo"><span>Razonamiento</span><select id="dlg-esfuerzo">'
+              + "".join(f'<option value="{e[0]}">{e[1]}</option>' for e in consumo.ESFUERZOS)
+              + '</select></label></div><div id="dlg-est" class="dlg-est" aria-live="polite"></div></div>')
+
+
+def barra_uso(nombre: str, antes, despues, nota: str = "") -> str:
+    """Barra de una ventana del plan: lo que había (sólido) y lo que gastó (rayado). Valores 0..1."""
+    if despues is None:
+        return (f'<div class="uso"><div class="uso-t"><b>{E(nombre)}</b><span>sin medir</span></div>'
+                f'{f"<p class=uso-n>{E(nota)}</p>" if nota else ""}</div>')
+    antes = despues if antes is None else min(antes, despues)
+    txt = (f"{consumo.pct(antes)} → {consumo.pct(despues)} (+{consumo.pct(despues - antes)})"
+           if antes != despues else f"{consumo.pct(despues)}")
+    alto = " alto" if despues >= 0.9 else ""
+    return (f'<div class="uso"><div class="uso-t"><b>{E(nombre)}</b><span>{E(txt)}</span></div>'
+            f'<div class="uso-bar{alto}" role="img" aria-label="{E(nombre)}: {E(txt)}">'
+            f'<i class="est" style="width:{despues * 100:.1f}%"></i><i style="width:{antes * 100:.1f}%"></i></div>'
+            f'{f"<p class=uso-n>{E(nota)}</p>" if nota else ""}</div>')
 
 
 # Logo de Patchwarden (el mismo que assets/logo.svg): escudo con una tirita
@@ -443,11 +492,22 @@ overflow:auto;max-height:440px;background:var(--card)}
 .toast{position:fixed;right:22px;bottom:22px;z-index:60;display:flex;gap:10px;align-items:center;background:var(--tip-bg);color:var(--tip-ink);
 padding:12px 12px 12px 16px;border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.25);max-width:440px;animation:entra .25s ease-out}
 .toast-x{background:transparent;border:0;color:inherit;opacity:.7;cursor:pointer;padding:2px}@keyframes entra{from{transform:translateY(12px);opacity:0}}
-dialog{border:0;border-radius:16px;padding:0;box-shadow:0 24px 60px rgba(0,0,0,.3);width:min(440px,92vw);background:var(--card);color:var(--ink)}
+dialog{border:0;border-radius:16px;padding:0;box-shadow:0 24px 60px rgba(0,0,0,.3);width:min(480px,92vw);max-height:92vh;overflow:auto;background:var(--card);color:var(--ink)}
 dialog::backdrop{background:var(--overlay);backdrop-filter:blur(2px)}
 .dlg-c{padding:24px}.dlg-i{width:44px;height:44px;border-radius:12px;background:var(--av-bg);color:var(--av-t);display:grid;place-items:center}
 .dlg-c h3{margin:14px 0 6px;font-size:17px}.dlg-c p{margin:0;color:var(--ink2)}.dlg-b{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}
 .campo{display:flex;flex-direction:column;gap:5px;margin-top:14px;font-size:13px;font-weight:600}
+.dlg-claude{margin-top:16px;padding-top:4px;border-top:1px solid var(--line)}
+.dlg-sel{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.campo select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
+.dlg-est{margin-top:16px;font-size:13px;color:var(--ink2)}.dlg-est dl{margin:12px 0 0}
+.uso{margin-top:12px}.uso:first-child{margin-top:0}.uso-t{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.uso-t b{color:var(--ink);font-weight:600}.uso-t span{font-variant-numeric:tabular-nums}
+.uso-bar{position:relative;height:8px;border-radius:99px;background:var(--line2);overflow:hidden;margin-top:4px}
+.uso-bar i{position:absolute;top:0;bottom:0;left:0;border-radius:99px;background:var(--acc)}
+.uso-bar i.est{background:repeating-linear-gradient(135deg,var(--acc) 0 3px,var(--acc2) 3px 6px)}
+.uso-bar.alto i{background:var(--alta)}.uso-bar.alto i.est{background:repeating-linear-gradient(135deg,var(--alta) 0 3px,var(--line2) 3px 6px)}
+.uso-n{margin:4px 0 0;font-size:12.5px;color:var(--muted)}
 .campo input{font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
 .sel{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--muted);font-weight:600}
 .sel select{font:inherit;font-weight:650;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--card);
@@ -519,6 +579,40 @@ background:rgba(38,56,77,.55);color:#fff;backdrop-filter:blur(4px)}.tg-k button:
 .tg-sep{text-align:center;margin:14px 0 4px}.tg-sep span{background:rgba(38,56,77,.45);color:#fff;border-radius:99px;
 padding:3px 11px;font-size:12px;font-weight:600}
 .tg-pie{background:#fff;padding:10px 14px;color:#8a94a6;font-size:13px;display:flex;gap:8px;align-items:center}
+
+/* --- acceso, usuario y ajustes --- */
+.side-user{display:flex;align-items:center;gap:8px;padding:8px 12px;margin-top:auto;border-top:1px solid var(--side-line);color:var(--side-ink);font-size:13px}
+.side-user span{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.side-user form{margin:0}
+.salir{all:unset;cursor:pointer;display:grid;place-items:center;width:32px;height:32px;border-radius:8px;color:var(--side-muted)}
+.salir:hover{background:var(--side2);color:var(--on-solid)}.salir:focus-visible{outline:2px solid var(--side-acc)}
+.acceso{min-height:100vh;display:grid;place-items:center;padding:24px 16px;background:var(--bg)}
+.acceso-c{width:min(420px,100%);background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--sh);padding:32px}
+.acceso-m{display:flex;align-items:center;gap:12px;font-size:17px}.acceso h1{font-size:21px;margin:24px 0 8px}
+.acceso .banner{margin-top:16px;padding:12px}.acceso .banner p{margin:0}.acceso .btn{width:100%;margin-top:24px;padding:12px}
+.acceso .campo input{padding:11px 12px}.acceso code{font-family:var(--mono);font-size:12.5px}
+.banner-mal{background:var(--mal-bg);border-color:var(--mal-line);color:var(--mal-t)}
+.pestanas{display:flex;gap:4px;border-bottom:1px solid var(--line);overflow-x:auto;scrollbar-width:none}
+.pestanas a{display:flex;align-items:center;gap:8px;padding:12px 16px;color:var(--ink2);font-weight:600;font-size:14px;
+border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;text-decoration:none!important}
+.pestanas a:hover{color:var(--ink)}.pestanas a[aria-current=page]{color:var(--acc);border-bottom-color:var(--acc)}
+.pestanas a:focus-visible{outline:2px solid var(--acc);outline-offset:-2px;border-radius:8px 8px 0 0}
+.ajustes-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:16px 24px}
+.ajustes-g .campo{margin-top:0}
+.form-estrecho{max-width:440px}.card-destacada{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}.campo input.mono{font-family:var(--mono);font-size:12.5px}.form-estrecho .campo:first-child{margin-top:0}
+.campo .ayuda{font-weight:400;color:var(--muted);font-size:12.5px}
+.campo input:disabled,.campo select:disabled{background:var(--neu-bg);color:var(--muted);cursor:not-allowed}
+.campo input:focus,.campo select:focus,.campo textarea:focus{outline:2px solid var(--acc);outline-offset:1px}
+.campo-bool{flex-direction:row;align-items:flex-start;gap:12px;font-weight:600}.campo-bool input{width:18px;height:18px;margin:1px 0 0;accent-color:var(--acc);flex:none}
+.campo-bool span{display:flex;flex-direction:column;gap:4px}
+.secreto{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.secreto input[type=password]{flex:1;min-width:0}
+.secreto label{display:flex;gap:6px;align-items:center;font-weight:400;font-size:12.5px;color:var(--muted)}
+.fijado{display:inline-flex;gap:6px;align-items:center;font-weight:400;font-size:12.5px;color:var(--av-t)}
+.form-pie{display:flex;justify-content:flex-end;gap:8px;flex-wrap:wrap;margin-top:24px;padding-top:16px;border-top:1px solid var(--line2)}
+.prueba-canal{display:flex;gap:12px;align-items:center;justify-content:space-between;flex-wrap:wrap}
+.prueba-canal p{margin:0}
+.side-user+.side-pie{margin-top:0}
+@media (max-width:640px){.form-pie .btn{width:100%}.acceso-c{padding:24px}}
+@media (max-width:860px){.side-user{border:0;margin:0 0 0 auto;padding:0}.side-user span,.side-user>.ico{display:none}}
 """
 
 JS = r"""
@@ -542,6 +636,7 @@ JS = r"""
       e.preventDefault();pendiente=f;
       document.getElementById('dlg-t').textContent=f.dataset.titulo||'¿Confirmas?';
       document.getElementById('dlg-m').textContent=f.dataset.confirmar;
+      prepararClaude(f);
       var ok=document.getElementById('dlg-ok');ok.className='btn '+(f.dataset.tono||'btn-primario');
       ok.textContent=f.dataset.boton||'Confirmar';
       if(dlg.showModal){dlg.showModal();}else if(confirm(f.dataset.confirmar)){enviar('si');}
@@ -552,9 +647,58 @@ JS = r"""
     var tk=document.getElementById('dlg-token');
     if(tk&&tk.value){var h=document.createElement('input');h.type='hidden';h.name='token';h.value=tk.value;pendiente.appendChild(h);}
     var c=document.createElement('input');c.type='hidden';c.name='confirmar';c.value='si';pendiente.appendChild(c);
+    if(pendiente.dataset.claude){['modelo','esfuerzo'].forEach(function(n){var h=document.createElement('input');
+      h.type='hidden';h.name=n;h.value=document.getElementById('dlg-'+n).value;pendiente.appendChild(h);});}
     pendiente.dataset.ok='1';pendiente.submit();
   }
   if(dlg){dlg.addEventListener('close',function(){enviar(dlg.returnValue);});}
+  // Corregir con Claude: modelo, razonamiento y consumo estimado (5 h, semanal y equivalente API)
+  var dc=document.getElementById('dlg-claude'),selM=document.getElementById('dlg-modelo'),
+      selE=document.getElementById('dlg-esfuerzo'),est=document.getElementById('dlg-est'),datosEst=null;
+  function pct(x){if(x==null)return '—';var v=x*100;return v>0&&v<1?'<1 %':Math.round(v)+' %';}
+  function usd(x){return x<1?x.toFixed(3)+' $':x.toFixed(2)+' $';}
+  function el(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cls;if(txt!=null)e.textContent=txt;return e;}
+  function filaUso(nombre,lim,p){
+    var d=el('div','uso'),t=el('div','uso-t'),b=el('div','uso-bar'),actual=lim?lim.uso:null,delta=p?p.delta:null;
+    t.appendChild(el('b',null,nombre));
+    var txt=actual==null?'sin medir todavía':'ahora '+pct(actual)+(delta!=null?' → ≈ '+pct(Math.min(1,actual+delta)):'');
+    t.appendChild(el('span',null,txt));d.appendChild(t);
+    if(actual!=null){
+      var fin=Math.min(1,actual+(delta||0));if(fin>=0.9)b.classList.add('alto');
+      var i1=el('i','est');i1.style.width=(fin*100)+'%';var i2=el('i');i2.style.width=(actual*100)+'%';
+      b.appendChild(i1);b.appendChild(i2);b.setAttribute('role','img');b.setAttribute('aria-label',nombre+': '+txt);d.appendChild(b);
+    }
+    var nota=[];
+    if(delta!=null)nota.push('esta corrección ≈ +'+pct(delta));
+    else nota.push('el gasto en % se conocerá tras la primera corrección');
+    if(lim&&lim.reinicio)nota.push('se reinicia '+lim.reinicio);
+    if(actual!=null&&delta!=null&&actual+delta>=1)nota.unshift('Atención: podría agotarse');
+    d.appendChild(el('p','uso-n',nota.join(' · ')));return d;
+  }
+  function pintarEst(){
+    if(!datosEst)return;var e=datosEst.estimaciones[selM.value+'|'+selE.value];est.textContent='';
+    if(!e||!datosEst.n){est.appendChild(el('p',null,'No hay componentes que corregir.'));return;}
+    var lim=datosEst.limites||{};
+    est.appendChild(filaUso('Ventana de 5 horas',lim.five_hour,e.plan.five_hour));
+    est.appendChild(filaUso('Límite semanal',lim.seven_day,e.plan.seven_day));
+    var dl=el('dl','dl');
+    dl.appendChild(el('dt',null,'Por API costaría'));
+    dl.appendChild(el('dd','mono','≈ '+usd(e.coste_usd)+(datosEst.n>1?' ('+datosEst.n+' componentes)':'')));
+    if(e.duracion_s){dl.appendChild(el('dt',null,'Duración típica'));dl.appendChild(el('dd',null,'≈ '+Math.max(1,Math.round(e.duracion_s/60))+' min'+(datosEst.n>1?' por componente':'')));}
+    est.appendChild(dl);
+    est.appendChild(el('p','uso-n','Estimación: '+e.fuente+'. Hasta el doble si la verificación falla y Claude reintenta. '
+      +(datosEst.medido?'Uso del plan medido el '+datosEst.medido+'; ':'')+'incluye lo que uses de Claude fuera del vigilante.'));
+  }
+  function prepararClaude(f){
+    if(!dc)return;dc.hidden=!f.dataset.claude;if(!f.dataset.claude)return;
+    datosEst=null;est.textContent='Calculando el consumo estimado…';
+    fetch('/api/claude/estimacion?'+f.dataset.claude,{credentials:'same-origin'}).then(function(r){
+      if(!r.ok)throw new Error(r.status);return r.json();}).then(function(d){
+      datosEst=d;var p=(d.defecto||'').split('|');
+      if(!selM.dataset.tocado&&p[0])selM.value=p[0];if(!selE.dataset.tocado&&p[1])selE.value=p[1];pintarEst();
+    }).catch(function(){est.textContent='No se pudo calcular la estimación. Puedes continuar igualmente.';});
+  }
+  if(dc){[selM,selE].forEach(function(s){s.addEventListener('change',function(){s.dataset.tocado='1';pintarEst();});});}
   // Filtros de la tabla de vulnerabilidades
   var tabla=document.getElementById('t-vulns');
   if(tabla){

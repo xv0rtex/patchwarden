@@ -54,6 +54,17 @@ class Avisador:
                 log.error("Fallo enviando aviso por %s: %s", nombre, e)
         return enviados
 
+    def probar(self, canal: str) -> str:
+        """Aviso de prueba por un canal ('webhook' | 'email') desde Ajustes: '' si salió, o el motivo del fallo."""
+        fn = {"webhook": self._webhook, "email": self._email}[canal]
+        try:
+            if not fn(f"[Patchwarden · {self.web}] Aviso de prueba",
+                      "Si lees esto, los avisos por este canal funcionan.", False):
+                return "Falta configurar este canal."
+        except Exception as e:  # noqa: BLE001
+            return f"No se pudo enviar: {e}"
+        return ""
+
     def _telegram(self, titulo, cuerpo, urgente):
         tok, chat = self.c.get("telegram_token"), self.c.get("telegram_chat_id")
         if not (tok and chat):
