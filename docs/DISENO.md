@@ -201,6 +201,18 @@ CVE, los ficheros y las páginas web se le marcan como **datos, no instrucciones
 contra inyección de instrucciones). Aun así, nada de lo que diga Claude se ejecuta fuera de la
 lista blanca de §6.4.
 
+**Modelo, razonamiento y consumo.** Por defecto se usan `[claude] modelo` y `esfuerzo`, pero al pedir
+una corrección desde el panel se puede elegir otro modelo (Opus 5.5, Sonnet 5.5, Haiku 5.5, Fable 5.1)
+y otro nivel de razonamiento (`--effort`: low…max). El diálogo muestra antes una estimación: el
+porcentaje que gastará de la ventana de 5 horas y del límite semanal del plan, y lo que costaría por
+API. `claude -p` se ejecuta con `--output-format stream-json`, que trae los eventos `rate_limit_event`
+(uso de cada ventana y hora de reinicio) y, al final, tokens y `total_cost_usd` (precio de lista; no
+se cobra). `consumo.py` guarda el último estado de las ventanas y un historial de ejecuciones en
+`/datos/consumo_claude.json`; cada plan guarda sus llamadas en `plan["claude"]`. Las estimaciones
+salen del historial (mismo modelo y razonamiento, escalado por tamaño de la petición) y, sin
+historial, de un cálculo aproximado por tokens. Los porcentajes son aproximados: el servidor los
+redondea al 1 % y una ventana incluye el uso de Claude que se haga fuera del vigilante.
+
 ## 6.3 Revisión de compatibilidad: automática y por Claude
 
 Antes de llamar a Claude, el vigilante saca **datos objetivos** de los registros. Así Claude no

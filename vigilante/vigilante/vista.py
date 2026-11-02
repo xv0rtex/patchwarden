@@ -12,6 +12,8 @@ import html
 import re
 import urllib.parse
 
+from . import consumo
+
 E = html.escape
 
 # ------------------------------------------------------------------ iconos (24x24, trazo)
@@ -246,10 +248,33 @@ def pagina(titulo: str, cuerpo: str, *, activo: str = "/", web: str = "", subtit
 <main class="cont">{cuerpo}</main></div></div>
 {t}<div class="tip" id="tip" hidden></div>
 <dialog id="dlg"><form method="dialog" class="dlg-c"><div class="dlg-i">{icono("alerta", 22)}</div>
-<h3 id="dlg-t">¿Confirmas?</h3><p id="dlg-m"></p>{token}
+<h3 id="dlg-t">¿Confirmas?</h3><p id="dlg-m"></p>{DLG_CLAUDE}{token}
 <div class="dlg-b"><button class="btn btn-secundario" value="no">Cancelar</button>
 <button class="btn btn-primario" value="si" id="dlg-ok">Confirmar</button></div></form></dialog>
 <script>{JS}</script></body></html>"""
+
+
+DLG_CLAUDE = ('<div id="dlg-claude" class="dlg-claude" hidden><div class="dlg-sel">'
+              '<label class="campo"><span>Modelo</span><select id="dlg-modelo">'
+              + "".join(f'<option value="{m[0]}">{m[1]}</option>' for m in consumo.MODELOS)
+              + '</select></label><label class="campo"><span>Razonamiento</span><select id="dlg-esfuerzo">'
+              + "".join(f'<option value="{e[0]}">{e[1]}</option>' for e in consumo.ESFUERZOS)
+              + '</select></label></div><div id="dlg-est" class="dlg-est" aria-live="polite"></div></div>')
+
+
+def barra_uso(nombre: str, antes, despues, nota: str = "") -> str:
+    """Barra de una ventana del plan: lo que había (sólido) y lo que gastó (rayado). Valores 0..1."""
+    if despues is None:
+        return (f'<div class="uso"><div class="uso-t"><b>{E(nombre)}</b><span>sin medir</span></div>'
+                f'{f"<p class=uso-n>{E(nota)}</p>" if nota else ""}</div>')
+    antes = despues if antes is None else min(antes, despues)
+    txt = (f"{consumo.pct(antes)} → {consumo.pct(despues)} (+{consumo.pct(despues - antes)})"
+           if antes != despues else f"{consumo.pct(despues)}")
+    alto = " alto" if despues >= 0.9 else ""
+    return (f'<div class="uso"><div class="uso-t"><b>{E(nombre)}</b><span>{E(txt)}</span></div>'
+            f'<div class="uso-bar{alto}" role="img" aria-label="{E(nombre)}: {E(txt)}">'
+            f'<i class="est" style="width:{despues * 100:.1f}%"></i><i style="width:{antes * 100:.1f}%"></i></div>'
+            f'{f"<p class=uso-n>{E(nota)}</p>" if nota else ""}</div>')
 
 
 # Logo de Patchwarden (el mismo que assets/logo.svg): escudo con una tirita
@@ -443,11 +468,22 @@ overflow:auto;max-height:440px;background:var(--card)}
 .toast{position:fixed;right:22px;bottom:22px;z-index:60;display:flex;gap:10px;align-items:center;background:var(--tip-bg);color:var(--tip-ink);
 padding:12px 12px 12px 16px;border-radius:12px;box-shadow:0 12px 32px rgba(0,0,0,.25);max-width:440px;animation:entra .25s ease-out}
 .toast-x{background:transparent;border:0;color:inherit;opacity:.7;cursor:pointer;padding:2px}@keyframes entra{from{transform:translateY(12px);opacity:0}}
-dialog{border:0;border-radius:16px;padding:0;box-shadow:0 24px 60px rgba(0,0,0,.3);width:min(440px,92vw);background:var(--card);color:var(--ink)}
+dialog{border:0;border-radius:16px;padding:0;box-shadow:0 24px 60px rgba(0,0,0,.3);width:min(480px,92vw);max-height:92vh;overflow:auto;background:var(--card);color:var(--ink)}
 dialog::backdrop{background:var(--overlay);backdrop-filter:blur(2px)}
 .dlg-c{padding:24px}.dlg-i{width:44px;height:44px;border-radius:12px;background:var(--av-bg);color:var(--av-t);display:grid;place-items:center}
 .dlg-c h3{margin:14px 0 6px;font-size:17px}.dlg-c p{margin:0;color:var(--ink2)}.dlg-b{display:flex;justify-content:flex-end;gap:10px;margin-top:22px}
 .campo{display:flex;flex-direction:column;gap:5px;margin-top:14px;font-size:13px;font-weight:600}
+.dlg-claude{margin-top:16px;padding-top:4px;border-top:1px solid var(--line)}
+.dlg-sel{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.campo select{font:inherit;padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
+.dlg-est{margin-top:16px;font-size:13px;color:var(--ink2)}.dlg-est dl{margin:12px 0 0}
+.uso{margin-top:12px}.uso:first-child{margin-top:0}.uso-t{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.uso-t b{color:var(--ink);font-weight:600}.uso-t span{font-variant-numeric:tabular-nums}
+.uso-bar{position:relative;height:8px;border-radius:99px;background:var(--line2);overflow:hidden;margin-top:4px}
+.uso-bar i{position:absolute;top:0;bottom:0;left:0;border-radius:99px;background:var(--acc)}
+.uso-bar i.est{background:repeating-linear-gradient(135deg,var(--acc) 0 3px,var(--acc2) 3px 6px)}
+.uso-bar.alto i{background:var(--alta)}.uso-bar.alto i.est{background:repeating-linear-gradient(135deg,var(--alta) 0 3px,var(--line2) 3px 6px)}
+.uso-n{margin:4px 0 0;font-size:12.5px;color:var(--muted)}
 .campo input{font:inherit;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--card);color:var(--ink)}
 .sel{display:flex;align-items:center;gap:9px;font-size:13px;color:var(--muted);font-weight:600}
 .sel select{font:inherit;font-weight:650;padding:9px 12px;border-radius:10px;border:1px solid var(--line);background:var(--card);
@@ -542,6 +578,7 @@ JS = r"""
       e.preventDefault();pendiente=f;
       document.getElementById('dlg-t').textContent=f.dataset.titulo||'¿Confirmas?';
       document.getElementById('dlg-m').textContent=f.dataset.confirmar;
+      prepararClaude(f);
       var ok=document.getElementById('dlg-ok');ok.className='btn '+(f.dataset.tono||'btn-primario');
       ok.textContent=f.dataset.boton||'Confirmar';
       if(dlg.showModal){dlg.showModal();}else if(confirm(f.dataset.confirmar)){enviar('si');}
@@ -552,9 +589,58 @@ JS = r"""
     var tk=document.getElementById('dlg-token');
     if(tk&&tk.value){var h=document.createElement('input');h.type='hidden';h.name='token';h.value=tk.value;pendiente.appendChild(h);}
     var c=document.createElement('input');c.type='hidden';c.name='confirmar';c.value='si';pendiente.appendChild(c);
+    if(pendiente.dataset.claude){['modelo','esfuerzo'].forEach(function(n){var h=document.createElement('input');
+      h.type='hidden';h.name=n;h.value=document.getElementById('dlg-'+n).value;pendiente.appendChild(h);});}
     pendiente.dataset.ok='1';pendiente.submit();
   }
   if(dlg){dlg.addEventListener('close',function(){enviar(dlg.returnValue);});}
+  // Corregir con Claude: modelo, razonamiento y consumo estimado (5 h, semanal y equivalente API)
+  var dc=document.getElementById('dlg-claude'),selM=document.getElementById('dlg-modelo'),
+      selE=document.getElementById('dlg-esfuerzo'),est=document.getElementById('dlg-est'),datosEst=null;
+  function pct(x){if(x==null)return '—';var v=x*100;return v>0&&v<1?'<1 %':Math.round(v)+' %';}
+  function usd(x){return x<1?x.toFixed(3)+' $':x.toFixed(2)+' $';}
+  function el(tag,cls,txt){var e=document.createElement(tag);if(cls)e.className=cls;if(txt!=null)e.textContent=txt;return e;}
+  function filaUso(nombre,lim,p){
+    var d=el('div','uso'),t=el('div','uso-t'),b=el('div','uso-bar'),actual=lim?lim.uso:null,delta=p?p.delta:null;
+    t.appendChild(el('b',null,nombre));
+    var txt=actual==null?'sin medir todavía':'ahora '+pct(actual)+(delta!=null?' → ≈ '+pct(Math.min(1,actual+delta)):'');
+    t.appendChild(el('span',null,txt));d.appendChild(t);
+    if(actual!=null){
+      var fin=Math.min(1,actual+(delta||0));if(fin>=0.9)b.classList.add('alto');
+      var i1=el('i','est');i1.style.width=(fin*100)+'%';var i2=el('i');i2.style.width=(actual*100)+'%';
+      b.appendChild(i1);b.appendChild(i2);b.setAttribute('role','img');b.setAttribute('aria-label',nombre+': '+txt);d.appendChild(b);
+    }
+    var nota=[];
+    if(delta!=null)nota.push('esta corrección ≈ +'+pct(delta));
+    else nota.push('el gasto en % se conocerá tras la primera corrección');
+    if(lim&&lim.reinicio)nota.push('se reinicia '+lim.reinicio);
+    if(actual!=null&&delta!=null&&actual+delta>=1)nota.unshift('Atención: podría agotarse');
+    d.appendChild(el('p','uso-n',nota.join(' · ')));return d;
+  }
+  function pintarEst(){
+    if(!datosEst)return;var e=datosEst.estimaciones[selM.value+'|'+selE.value];est.textContent='';
+    if(!e||!datosEst.n){est.appendChild(el('p',null,'No hay componentes que corregir.'));return;}
+    var lim=datosEst.limites||{};
+    est.appendChild(filaUso('Ventana de 5 horas',lim.five_hour,e.plan.five_hour));
+    est.appendChild(filaUso('Límite semanal',lim.seven_day,e.plan.seven_day));
+    var dl=el('dl','dl');
+    dl.appendChild(el('dt',null,'Por API costaría'));
+    dl.appendChild(el('dd','mono','≈ '+usd(e.coste_usd)+(datosEst.n>1?' ('+datosEst.n+' componentes)':'')));
+    if(e.duracion_s){dl.appendChild(el('dt',null,'Duración típica'));dl.appendChild(el('dd',null,'≈ '+Math.max(1,Math.round(e.duracion_s/60))+' min'+(datosEst.n>1?' por componente':'')));}
+    est.appendChild(dl);
+    est.appendChild(el('p','uso-n','Estimación: '+e.fuente+'. Hasta el doble si la verificación falla y Claude reintenta. '
+      +(datosEst.medido?'Uso del plan medido el '+datosEst.medido+'; ':'')+'incluye lo que uses de Claude fuera del vigilante.'));
+  }
+  function prepararClaude(f){
+    if(!dc)return;dc.hidden=!f.dataset.claude;if(!f.dataset.claude)return;
+    datosEst=null;est.textContent='Calculando el consumo estimado…';
+    fetch('/api/claude/estimacion?'+f.dataset.claude,{credentials:'same-origin'}).then(function(r){
+      if(!r.ok)throw new Error(r.status);return r.json();}).then(function(d){
+      datosEst=d;var p=(d.defecto||'').split('|');
+      if(!selM.dataset.tocado&&p[0])selM.value=p[0];if(!selE.dataset.tocado&&p[1])selE.value=p[1];pintarEst();
+    }).catch(function(){est.textContent='No se pudo calcular la estimación. Puedes continuar igualmente.';});
+  }
+  if(dc){[selM,selE].forEach(function(s){s.addEventListener('change',function(){s.dataset.tocado='1';pintarEst();});});}
   // Filtros de la tabla de vulnerabilidades
   var tabla=document.getElementById('t-vulns');
   if(tabla){

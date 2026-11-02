@@ -16,6 +16,7 @@ import html
 import logging
 import threading
 
+from . import consumo
 from .http import peticion
 from .planes import aprobados, pendientes
 
@@ -124,6 +125,20 @@ def estado_verificacion_cambio(plan, c) -> str:
     return "NO se pudo preparar en la copia (ver pasos de la verificación)"
 
 
+def texto_consumo(cl: dict) -> str:
+    """'Opus 5.5 · razonamiento alto · ventana 5 h +3 % (ahora 48 %) · semanal +1 % (ahora 16 %) · API ≈ 0.420 $'"""
+    t, ultima = cl.get("total") or {}, cl["llamadas"][-1]
+    partes = [consumo.NOMBRE_MODELO.get(cl.get("modelo"), cl.get("modelo") or "?"),
+              "razonamiento " + consumo.NOMBRE_ESFUERZO.get(cl.get("esfuerzo"), cl.get("esfuerzo") or "?").lower()]
+    for k, nombre in (("five_hour", "ventana 5 h"), ("seven_day", "semanal")):
+        if k in (t.get("delta") or {}):
+            partes.append(f"{nombre} +{consumo.pct(t['delta'][k])} (ahora {consumo.pct((ultima.get('despues') or {}).get(k))})")
+    partes.append(f"API ≈ {consumo.usd(t.get('coste_usd'))}")
+    if len(cl["llamadas"]) > 1:
+        partes.append(f"{len(cl['llamadas'])} llamadas")
+    return " · ".join(partes)
+
+
 def texto_cabecera(plan, url_panel="") -> str:
     c, a, v = plan["componente"], plan.get("analisis") or {}, plan.get("verificacion") or {}
     ent = a.get("entendimiento") or {}
@@ -147,6 +162,9 @@ def texto_cabecera(plan, url_panel="") -> str:
         lineas.append(f"{icono} {E(p['paso'])}: {E(p['detalle'][:150])}")
     if v.get("deprecaciones"):
         lineas.append(f"<b>Deprecaciones vistas:</b> {E('; '.join(v['deprecaciones'][:3])[:300])}")
+    cl = plan.get("claude") or {}
+    if cl.get("llamadas"):
+        lineas += ["", f"<b>Consumo de Claude:</b> {E(texto_consumo(cl))}"]
     lineas += ["", f"Abajo va cada cambio con su justificación. <b>No se aplicará nada sin tu aprobación.</b>"]
     if url_panel:
         lineas.append(f"Detalle y diffs: {E(url_panel)}")

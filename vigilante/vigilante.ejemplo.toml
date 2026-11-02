@@ -50,8 +50,8 @@ puerto = 8080
 # Corrección con Claude: proponer -> verificar en copia -> TÚ apruebas -> aplicar -> comprobar
 # ---------------------------------------------------------------------------------------
 [claude]
-modelo = "claude-opus-5-5"
-esfuerzo = "high"
+modelo = "claude-opus-5-5"   # por defecto; en el panel se puede elegir otro al pedir cada corrección
+esfuerzo = "high"            # razonamiento: low | medium | high | xhigh | max
 severidad_minima = "ALTA"    # a partir de qué severidad se prepara un plan de corrección
 max_planes_por_ciclo = 3
 investigar_web = true        # puede leer changelogs y guías de migración oficiales

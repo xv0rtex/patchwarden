@@ -22,6 +22,8 @@ import subprocess
 import tempfile
 import time
 
+from . import consumo
+
 log = logging.getLogger("vigilante.claude")
 
 SISTEMA = """Eres un ingeniero de seguridad que mantiene webs en producción desplegadas con Docker.
@@ -242,7 +244,8 @@ def construir_peticion(plan: dict, runtimes: dict, capacidades: str) -> str:
 # ------------------------------------------------------------------ llamada
 def _argumentos(cfg: dict, binario: str) -> list:
     web = cfg.get("investigar_web", True)
-    args = [binario, "-p", "--output-format", "json", "--json-schema", json.dumps(ESQUEMA),
+    # stream-json (exige --verbose) trae, además del resultado, los eventos de límites del plan
+    args = [binario, "-p", "--output-format", "stream-json", "--verbose", "--json-schema", json.dumps(ESQUEMA),
             "--system-prompt", SISTEMA,
             "--model", cfg.get("modelo", "claude-opus-5-5"), "--effort", cfg.get("esfuerzo", "high"),
             "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
@@ -264,10 +267,54 @@ def _error_de(datos: dict) -> ErrorClaude:
     return ErrorClaude(f"Claude Code no devolvió un plan: {detalle}")
 
 
-def _llamar(cfg: dict, peticion: str) -> dict:
+def _mensajes(salida: str) -> list[dict]:
+    """stdout de `claude -p`: un objeto JSON (--output-format json) o uno por línea (stream-json)."""
+    try:
+        d = json.loads(salida)
+        return [d] if isinstance(d, dict) else []
+    except ValueError:
+        pass
+    out = []
+    for linea in salida.splitlines():
+        try:
+            d = json.loads(linea)
+        except ValueError:
+            continue
+        if isinstance(d, dict):
+            out.append(d)
+    return out
+
+
+def _uso(mensajes: list[dict], datos: dict, uso: dict):
+    """Rellena `uso` con el consumo de la ejecución: límites del plan al empezar y al terminar,
+    tokens y coste equivalente en API. Nada de esto contiene el contenido de la conversación."""
+    eventos = [consumo.limites_de(m.get("rate_limit_info")) for m in mensajes if m.get("type") == "rate_limit_event"]
+    eventos = [e for e in eventos if e]
+    if eventos:
+        uso["limites_inicio"], uso["limites_fin"] = eventos[0], eventos[-1]
+    u = datos.get("usage") or {}
+    uso["tokens"] = {"entrada": u.get("input_tokens") or 0, "salida": u.get("output_tokens") or 0,
+                     "cache_escritura": u.get("cache_creation_input_tokens") or 0,
+                     "cache_lectura": u.get("cache_read_input_tokens") or 0,
+                     "razonamiento": (u.get("output_tokens_details") or {}).get("thinking_tokens") or 0}
+    uso["busquedas_web"] = (u.get("server_tool_use") or {}).get("web_search_requests") or 0
+    uso["coste_usd"] = datos.get("total_cost_usd")
+    uso["turnos"] = datos.get("num_turns")
+    modelos = list((datos.get("modelUsage") or {}).keys())
+    if modelos:
+        uso["modelos_usados"] = modelos
+
+
+def _llamar(cfg: dict, peticion: str, uso: dict | None = None) -> dict:
+    """Ejecuta Claude Code y devuelve el plan. Si se pasa `uso`, lo rellena con el consumo
+    (también cuando falla: una ejecución fallida también gasta cupo del plan)."""
+    uso = {} if uso is None else uso
+    uso.update(modelo=cfg.get("modelo", "claude-opus-5-5"), esfuerzo=cfg.get("esfuerzo", "high"),
+               tamano_peticion=len(peticion), ok=False)
     binario = _binario(cfg)
     if not binario:
         raise ErrorClaude("no se encuentra el comando de Claude Code")
+    t0 = time.monotonic()
     # Carpeta vacía: sin acceso al proyecto ni a un .mcp.json o .claude/ que hubiera en él
     with tempfile.TemporaryDirectory(prefix="vigilante-claude-") as vacia:
         try:
@@ -277,23 +324,27 @@ def _llamar(cfg: dict, peticion: str) -> dict:
             raise ErrorClaude(f"Claude Code no terminó en {e.timeout} s") from e
         except OSError as e:
             raise ErrorClaude(f"no se pudo ejecutar Claude Code: {e}") from e
-    try:
-        datos = json.loads(r.stdout)
-    except ValueError as e:
-        raise ErrorClaude(f"Claude Code falló (código {r.returncode}): {r.stderr.strip()[:300]}") from e
-    if not isinstance(datos, dict):
-        raise ErrorClaude("Claude Code devolvió una respuesta inesperada")
+        finally:
+            uso["duracion_s"] = round(time.monotonic() - t0, 1)
+    mensajes = _mensajes(r.stdout)
+    # el resultado es el mensaje «result» (stream-json) o el único objeto (json)
+    datos = next((m for m in reversed(mensajes) if m.get("type") == "result"),
+                 mensajes[0] if len(mensajes) == 1 else None)
+    if datos is None:
+        raise ErrorClaude(f"Claude Code falló (código {r.returncode}): {r.stderr.strip()[:300]}")
+    _uso(mensajes, datos, uso)
     plan = datos.get("structured_output")
     if r.returncode != 0 or datos.get("is_error") or not isinstance(plan, dict):
         raise _error_de(datos)
+    uso["ok"] = True
     return plan
 
 
-def analizar(cfg: dict, plan: dict, runtimes: dict, capacidades: str) -> dict:
-    return _llamar(cfg, construir_peticion(plan, runtimes, capacidades))
+def analizar(cfg: dict, plan: dict, runtimes: dict, capacidades: str, uso: dict | None = None) -> dict:
+    return _llamar(cfg, construir_peticion(plan, runtimes, capacidades), uso)
 
 
-def corregir(cfg: dict, plan: dict, runtimes: dict, capacidades: str, fallo: str) -> dict:
+def corregir(cfg: dict, plan: dict, runtimes: dict, capacidades: str, fallo: str, uso: dict | None = None) -> dict:
     """Segunda oportunidad: se le enseña su plan y por qué falló la verificación."""
     previo = {k: plan["analisis"][k] for k in ("version_objetivo", "estrategia")}
     previo["cambios"] = plan["cambios_originales"]
@@ -308,4 +359,4 @@ La verificación automática de ese plan en una copia del proyecto ha FALLADO:
 <resultado_verificacion>
 {fallo[:12000]}
 </resultado_verificacion>
-Analiza la causa y devuelve el plan completo corregido con el mismo formato. Si no se puede corregir sin riesgo, propón la alternativa más segura (p. ej. otra versión o una mitigación temporal) y explícalo.""")
+Analiza la causa y devuelve el plan completo corregido con el mismo formato. Si no se puede corregir sin riesgo, propón la alternativa más segura (p. ej. otra versión o una mitigación temporal) y explícalo.""", uso)

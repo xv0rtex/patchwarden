@@ -1,5 +1,7 @@
 """Pruebas sin red: python3 -m unittest discover -s pruebas"""
+import json
 import os
+import tempfile
 import sys
 import unittest
 
@@ -201,6 +203,30 @@ class ClaudeCode(unittest.TestCase):
         cfg = self._falso('{"is_error": false, "structured_output": {"cambios": []}}')
         self.assertEqual(claude._llamar(cfg, "hola"), {"cambios": []})
 
+    def test_stream_json_con_consumo(self):
+        from vigilante import claude
+        lineas = [{"type": "system", "subtype": "init"},
+                  {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "unifiedWindows": {
+                      "five_hour": {"utilization": 0.45, "resetsAt": 4102444800},
+                      "seven_day": {"utilization": 0.15, "resetsAt": 4102444900}}}},
+                  {"type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "unifiedWindows": {
+                      "five_hour": {"utilization": 0.48, "resetsAt": 4102444800},
+                      "seven_day": {"utilization": 0.16, "resetsAt": 4102444900}}}},
+                  {"type": "result", "is_error": False, "structured_output": {"cambios": []}, "total_cost_usd": 0.5,
+                   "usage": {"input_tokens": 10, "output_tokens": 20, "cache_read_input_tokens": 30}}]
+        cfg = self._falso("\n".join(json.dumps(x) for x in lineas))
+        cfg.update(modelo="claude-sonnet-5-5", esfuerzo="low")
+        uso = {}
+        self.assertEqual(claude._llamar(cfg, "hola", uso), {"cambios": []})
+        self.assertTrue(uso["ok"])
+        self.assertEqual((uso["modelo"], uso["esfuerzo"], uso["coste_usd"]), ("claude-sonnet-5-5", "low", 0.5))
+        self.assertEqual(uso["tokens"]["cache_lectura"], 30)
+        self.assertEqual(uso["limites_inicio"]["ventanas"]["five_hour"]["uso"], 0.45)
+        self.assertEqual(uso["limites_fin"]["ventanas"]["seven_day"]["uso"], 0.16)
+        args = claude._argumentos(cfg, "claude")
+        self.assertEqual(args[args.index("--model") + 1], "claude-sonnet-5-5")
+        self.assertEqual(args[args.index("--effort") + 1], "low")
+
     def test_errores(self):
         from vigilante import claude
         casos = [('{"is_error": true, "api_error_status": 429, "result": "x"}', 1, "límite de uso"),
@@ -219,6 +245,45 @@ class ClaudeCode(unittest.TestCase):
         cfg = self._falso('{"loggedIn": true, "authMethod": "claude.ai"}')
         cfg["oauth_token"] = ""
         self.assertTrue(claude.disponible(cfg))
+
+
+class Consumo(unittest.TestCase):
+    def _plan(self):
+        return {"id": "abc", "componente": {"nombre": "php", "version": "8.1.2", "app": "web"}}
+
+    def _uso(self, a5, d5, coste=0.4, reinicio_fin=4102444800):
+        ev = lambda u5, r: {"ventanas": {"five_hour": {"uso": u5, "reinicio": r}}, "fecha": 0}
+        return {"modelo": "claude-opus-5-5", "esfuerzo": "high", "coste_usd": coste, "duracion_s": 60,
+                "tamano_peticion": 10_000, "limites_inicio": ev(a5, 4102444800), "limites_fin": ev(d5, reinicio_fin)}
+
+    def test_registrar_y_estimar(self):
+        from vigilante import consumo
+        with tempfile.TemporaryDirectory() as d:
+            c = consumo.Consumo(d)
+            sin = c.estimar("claude-opus-5-5", "high", 10_000)
+            self.assertIsNone(sin["plan"]["five_hour"]["delta"])          # sin historial no se inventa el %
+            self.assertGreater(sin["coste_usd"], 0)
+            plan = self._plan()
+            r = c.registrar(plan, "analisis", self._uso(0.40, 0.44))
+            self.assertAlmostEqual(r["delta"]["five_hour"], 0.04)
+            self.assertAlmostEqual(plan["claude"]["total"]["coste_usd"], 0.4)
+            e = c.estimar("claude-opus-5-5", "high", 20_000)               # el doble de contexto
+            self.assertAlmostEqual(e["coste_usd"], 0.8)
+            self.assertAlmostEqual(e["plan"]["five_hour"]["delta"], 0.08)
+            self.assertAlmostEqual(e["plan"]["five_hour"]["actual"], 0.44)
+            self.assertEqual(len(consumo.Consumo(d).datos["historial"]), 1)  # persistido
+
+    def test_ventana_reiniciada_a_mitad(self):
+        from vigilante import consumo
+        with tempfile.TemporaryDirectory() as d:
+            r = consumo.Consumo(d).registrar(self._plan(), "analisis", self._uso(0.90, 0.02, reinicio_fin=4102462800))
+            self.assertAlmostEqual(r["delta"]["five_hour"], 0.02)
+
+    def test_formato(self):
+        from vigilante import consumo
+        self.assertEqual(consumo.pct(0.004), "<1 %")
+        self.assertEqual(consumo.pct(0.453), "45 %")
+        self.assertEqual(consumo.usd(0.4213), "0.421 $")
 
 
 if __name__ == "__main__":

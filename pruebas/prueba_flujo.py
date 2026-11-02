@@ -143,7 +143,7 @@ def main():
     args = pet["args"]
     opcion = lambda nombre: args[args.index(nombre) + 1]
     ok(args[0] == "-p" and opcion("--model") == "claude-opus-5-5", "Claude Code sin interfaz (-p), modelo claude-opus-5-5")
-    ok(opcion("--output-format") == "json" and "cambios" in json.loads(opcion("--json-schema"))["properties"],
+    ok(opcion("--output-format") == "stream-json" and "cambios" in json.loads(opcion("--json-schema"))["properties"],
        "salida estructurada con esquema JSON")
     ok(opcion("--tools") == "WebSearch,WebFetch" and opcion("--allowedTools") == "WebSearch,WebFetch",
        "solo puede leer changelogs (WebSearch/WebFetch): sin terminal ni ficheros")

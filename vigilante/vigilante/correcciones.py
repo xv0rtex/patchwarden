@@ -11,8 +11,9 @@ import logging
 import os
 import queue
 import threading
+import time
 
-from . import claude, compatibilidad, telegram
+from . import claude, compatibilidad, consumo, telegram
 from .aplicar import Aplicador, ErrorAplicacion
 from .modelo import ORDEN_SEVERIDAD, Componente
 from .planes import Planes, aprobados, pendientes
@@ -26,6 +27,8 @@ class Gestor:
         self.v = vigilante
         self.cfg = vigilante.cfg
         self.planes = Planes(vigilante.datos)
+        self.consumo = consumo.Consumo(vigilante.datos)
+        self._tamanos: dict = {}       # (raiz, paquete) -> (instante, caracteres de contexto)
         self.verificador = Verificador(self.cfg, vigilante.datos)
         self.aplicador = Aplicador(self.cfg, vigilante.datos, self.verificador)
         self.bot = telegram.Bot(self.cfg["avisos"], self._boton)
@@ -106,7 +109,60 @@ class Gestor:
             return "sin_codigo", "Sin código del proyecto montado"
         return "disponible", ""
 
-    def solicitar_componente(self, clave: str, por: str) -> str:
+    # ------------------------------------------------------------------ modelo, razonamiento y consumo
+    def eleccion(self, modelo: str | None = None, esfuerzo: str | None = None) -> tuple[str, str]:
+        """Modelo y razonamiento pedidos, o los de la configuración si no se piden o no son válidos."""
+        cc = self.cfg["claude"]
+        m = modelo if modelo in consumo.NOMBRE_MODELO else cc.get("modelo", "claude-opus-5-5")
+        e = esfuerzo if esfuerzo in consumo.NOMBRE_ESFUERZO else cc.get("esfuerzo", "high")
+        return m, e
+
+    def _cfg_claude(self, plan) -> dict:
+        elegido = plan.get("claude") or {}
+        m, e = self.eleccion(elegido.get("modelo"), elegido.get("esfuerzo"))
+        return {**self.cfg["claude"], "modelo": m, "esfuerzo": e}
+
+    def _tamano_peticion(self, comp: dict) -> int:
+        """Caracteres aproximados de lo que se le enviará a Claude (para estimar el coste)."""
+        raiz = self._raiz(self._como_objeto(comp))
+        clave = (raiz, comp["nombre"])
+        previo = self._tamanos.get(clave)
+        if not previo or time.monotonic() - previo[0] > 600:
+            try:
+                n = len(claude.contexto_ficheros(raiz, comp["nombre"])) if raiz else 0
+            except OSError:
+                n = 0
+            previo = self._tamanos[clave] = (time.monotonic(), n)
+        return previo[1] + 3000 + 300 * min(40, len(self._vulns_de(comp["clave"])))
+
+    def estimaciones(self, comps: list[dict]) -> dict:
+        """{"modelo|esfuerzo": estimación} sumando los componentes indicados (para el diálogo del panel)."""
+        tamanos = [self._tamano_peticion(c) for c in comps]
+        web = self.cfg["claude"].get("investigar_web", True)
+        out = {}
+        for m in consumo.NOMBRE_MODELO:
+            for e in consumo.NOMBRE_ESFUERZO:
+                ests = [self.consumo.estimar(m, e, t, web) for t in tamanos]
+                if not ests:
+                    continue
+                total = dict(ests[0], coste_usd=round(sum(x["coste_usd"] for x in ests), 4))
+                total["plan"] = {k: dict(v, delta=None if v["delta"] is None else
+                                         round(sum(x["plan"][k]["delta"] for x in ests), 4))
+                                 for k, v in ests[0]["plan"].items()}
+                out[f"{m}|{e}"] = total
+        return out
+
+    def _registrar_consumo(self, plan, tipo, uso):
+        if uso.get("duracion_s") is None:       # no llegó a ejecutarse
+            return
+        r = self.consumo.registrar(plan, tipo, uso)
+        d = r.get("delta") or {}
+        self.planes.evento(plan, f"consumo de Claude ({tipo}): {consumo.NOMBRE_MODELO.get(r['modelo'], r['modelo'])}, "
+                                 f"razonamiento {consumo.NOMBRE_ESFUERZO.get(r['esfuerzo'], r['esfuerzo']).lower()}, "
+                                 f"{r['duracion_s']:.0f} s, ventana 5 h +{consumo.pct(d.get('five_hour'))}, "
+                                 f"semanal +{consumo.pct(d.get('seven_day'))}, equivalente API {consumo.usd(r['coste_usd'])}")
+
+    def solicitar_componente(self, clave: str, por: str, modelo: str | None = None, esfuerzo: str | None = None) -> str:
         """El usuario pide EXPLÍCITAMENTE que Claude prepare una corrección para un componente."""
         comp = next((c for c in self.v.estado.get("componentes", []) if c["clave"] == clave), None)
         if not comp:
@@ -119,7 +175,11 @@ class Gestor:
         raiz = self._raiz(self._como_objeto(comp))
         plan = self.planes.crear(comp, self._vulns_de(clave), raiz)
         plan["solicitado_por"] = por
-        self.planes.evento(plan, f"corrección solicitada por {por}: Claude empieza a trabajar", por)
+        m, e = self.eleccion(modelo, esfuerzo)
+        est = self.consumo.estimar(m, e, self._tamano_peticion(comp), self.cfg["claude"].get("investigar_web", True))
+        plan["claude"] = {"modelo": m, "esfuerzo": e, "estimacion": est, "llamadas": []}
+        self.planes.evento(plan, f"corrección solicitada por {por} con {consumo.NOMBRE_MODELO[m]}, razonamiento "
+                                 f"{consumo.NOMBRE_ESFUERZO[e].lower()}: Claude empieza a trabajar", por)
         self.cola.put(plan["id"])
         log.warning("Plan %s solicitado por %s para %s %s", plan["id"], por, comp["nombre"], comp["version"])
         return (f"Claude está preparando la corrección de {comp['nombre']} {comp['version']}. "
@@ -139,13 +199,13 @@ class Gestor:
         out.sort(key=lambda t: (not any(v["critico"] for v in t[1]), -max((v.get("cvss") or 0) for v in t[1])))
         return [c for c, _ in out][: int(cc.get("max_planes_por_solicitud", 6))]
 
-    def solicitar_app(self, app: str, por: str) -> str:
+    def solicitar_app(self, app: str, por: str, modelo: str | None = None, esfuerzo: str | None = None) -> str:
         """El usuario pide EXPLÍCITAMENTE resolver los componentes con vulnerabilidades importantes de una app."""
         cands = self.candidatos_app(app)
         if not cands:
             return f"{app}: no hay nada que Claude pueda resolver ahora (sin vulnerabilidades relevantes, sin clave o sin código montado)."
         for c in cands:
-            self.solicitar_componente(c["clave"], por)
+            self.solicitar_componente(c["clave"], por, modelo, esfuerzo)
         return (f"Claude está preparando {len(cands)} corrección(es) para {app}. "
                 "Irán apareciendo en Correcciones; no se aplicará nada sin tu aprobación.")
 
@@ -176,6 +236,11 @@ class Gestor:
                 "aplicará sin tu aprobación.",
                 [[telegram.b("Resolver con Claude", "rsv", self._id_corto(clave)),
                   telegram.b("Ahora no", "nop", self._id_corto(clave))]], silencioso=True)
+
+    def _texto_estimacion(self, comp: dict) -> str:
+        m, e = self.eleccion()
+        return consumo.texto_estimacion(self.consumo.estimar(m, e, self._tamano_peticion(comp),
+                                                             self.cfg["claude"].get("investigar_web", True)))
 
     def _raiz(self, comp) -> str:
         """Carpeta del proyecto de la app del componente ('' si no hay código montado que modificar)."""
@@ -211,13 +276,17 @@ class Gestor:
         self.planes.evento(plan, f"revisión automática de compatibilidad hacia {minima or '¿?'}")
 
         capacidades = self.verificador.capacidades()
+        cfg_claude = self._cfg_claude(plan)
+        uso: dict = {}
         try:
-            analisis = claude.analizar(self.cfg["claude"], plan, runtimes, capacidades)
+            analisis = claude.analizar(cfg_claude, plan, runtimes, capacidades, uso)
         except claude.ErrorClaude as e:
             plan["estado"] = "error"
+            self._registrar_consumo(plan, "analisis", uso)
             self.planes.evento(plan, f"Claude no pudo analizar: {e}")
             self.v.avisador.enviar(f"No se pudo preparar corrección para {plan['componente']['nombre']}", str(e))
             return
+        self._registrar_consumo(plan, "analisis", uso)
         self._incorporar(plan, analisis, runtimes)
         self.planes.evento(plan, f"Claude propone {len(plan['cambios'])} cambio(s) → {analisis.get('version_objetivo')}")
         if not plan["cambios"]:
@@ -235,8 +304,10 @@ class Gestor:
         if plan["verificacion"]["estado"] in ("fallo", "parcial") and self.cfg["claude"].get("reintento_si_falla", True):
             fallo = "\n".join(f"[{'OK' if p['ok'] else ('FALLO' if p['ok'] is False else 'INFO')}] {p['paso']}: "
                               f"{p['detalle']}\n{p.get('salida', '')[-1500:]}" for p in plan["verificacion"]["pasos"])
+            uso = {}
             try:
-                analisis = claude.corregir(self.cfg["claude"], plan, runtimes, capacidades, fallo)
+                analisis = claude.corregir(cfg_claude, plan, runtimes, capacidades, fallo, uso)
+                self._registrar_consumo(plan, "reintento", uso)
                 previa = plan["verificacion"]
                 self._incorporar(plan, analisis, runtimes)
                 plan["verificacion"] = self.verificador.verificar(plan)
@@ -244,6 +315,7 @@ class Gestor:
                 self.planes.evento(plan, f"Claude corrigió el plan tras el fallo; nueva verificación: "
                                          f"{plan['verificacion']['estado']}")
             except claude.ErrorClaude as e:
+                self._registrar_consumo(plan, "reintento", uso)
                 self.planes.evento(plan, f"no se pudo corregir el plan: {e}")
 
         plan["estado"] = "pendiente_aprobacion"
@@ -411,7 +483,8 @@ class Gestor:
                                 f"<b>¿Confirmas pedir a Claude la corrección de {telegram.E(comp['nombre'])} "
                                 f"{telegram.E(comp['version'])}?</b>\n\nSe enviarán a Anthropic, a través de Claude Code, las "
                                 "vulnerabilidades y los ficheros de despliegue del proyecto (no los .env ni los datos). "
-                                "Consume uso de tu plan de Claude. No se modificará nada hasta que apruebes cada cambio.",
+                                "Consume uso de tu plan de Claude. No se modificará nada hasta que apruebes cada cambio.\n\n"
+                                f"<b>Consumo estimado:</b> {telegram.E(self._texto_estimacion(comp))}",
                                 [[telegram.b("Sí, resolver con Claude", "cfs", plan_id), telegram.b("Cancelar", "nop", plan_id)]])
                 return "Confirma para continuar"
             resultado = self.solicitar_componente(comp["clave"], quien)

@@ -20,7 +20,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import claude
+from . import claude, consumo
 from . import vista as V
 from .modelo import ORDEN_SEVERIDAD
 from .planes import aprobados, pendientes
@@ -151,15 +151,33 @@ class Panel:
                                                           "/vulnerabilidades": criticas},
                         extra_nav=extra_nav, dialogo_token=ctx.get("pide_token", False), selector=selector, **kw)
 
-    def _form_resolver(self, campos: str, texto: str, etiqueta: str, tamano_pequeno=True) -> str:
+    def _form_resolver(self, campos: str, texto: str, etiqueta: str, consulta: dict, tamano_pequeno=True) -> str:
         """Formulario con ventana de confirmación: el usuario inicia EXPLÍCITAMENTE la resolución con Claude."""
         pequeno = 'style="padding:4px 12px"' if tamano_pequeno else ""
         aviso = (" Se enviarán a Anthropic, a través de Claude Code, las vulnerabilidades y los ficheros de despliegue del "
                  "proyecto (nunca los .env ni los datos de la app), y consume uso de tu plan de Claude. Claude solo "
                  "propone: no se modificará nada hasta que apruebes cada cambio.")
+        # data-claude: el diálogo muestra la elección de modelo/razonamiento y pide la estimación al abrirse
         return (f'<form method="post" action="/api/claude/resolver" data-confirmar="{E(texto + aviso, quote=True)}" '
-                f'data-titulo="Corregir con Claude" data-boton="Sí, corregir con Claude">{campos}'
+                f'data-titulo="Corregir con Claude" data-boton="Sí, corregir con Claude" '
+                f'data-claude="{E(urllib.parse.urlencode(consulta), quote=True)}">{campos}'
                 f'{V.boton(etiqueta, "secundario", "robot", attrs=pequeno)}</form>')
+
+    def estimacion(self, q: dict) -> dict:
+        """Para el diálogo de «Corregir con Claude»: estimaciones por modelo y razonamiento + estado del plan."""
+        g = self.v.gestor
+        if q.get("app"):
+            comps = g.candidatos_app(q["app"])
+        else:
+            comps = [c for c in self.v.estado.get("componentes", []) if c["clave"] == q.get("clave")]
+        m, e = g.eleccion()
+        lim = g.consumo.limites()
+        return {"defecto": f"{m}|{e}", "n": len(comps), "estimaciones": g.estimaciones(comps),
+                "limites": {k: {"uso": w["uso"], "reinicio": consumo.hora_reinicio(w.get("reinicio")),
+                                "reiniciada": bool(w.get("reiniciada"))}
+                            for k, w in lim["ventanas"].items() if w},
+                "medido": _hora(dt.datetime.fromtimestamp(lim["fecha"]).isoformat(timespec="seconds"))
+                if lim.get("fecha") else ""}
 
     def _celda_resolver(self, c: dict) -> str:
         estado, dato = self.v.gestor.estado_resolver(c)
@@ -168,7 +186,7 @@ class Panel:
         if estado == "disponible":
             return self._form_resolver(f'<input type="hidden" name="clave" value="{E(c["clave"], quote=True)}">',
                                        f"Claude preparará una corrección para {c['nombre']} {c['version']}"
-                                       f"{self._resumen_cambio(c)}.", "Corregir con Claude")
+                                       f"{self._resumen_cambio(c)}.", "Corregir con Claude", {"clave": c["clave"]})
         return f'<span class="muted peq">{E(dato) if estado != "sin_vulns" else "—"}</span>'
 
     def _resumen_cambio(self, c: dict) -> str:
@@ -194,7 +212,7 @@ class Panel:
             return ""
         return self._form_resolver(f'<input type="hidden" name="app" value="{E(app, quote=True)}">',
                                    f"Claude preparará correcciones para {n} componente(s) de {app} con vulnerabilidades "
-                                   "importantes (una por componente).", f"Corregir {app} con Claude", False)
+                                   "importantes (una por componente).", f"Corregir {app} con Claude", {"app": app}, False)
 
     def _boton_analizar(self):
         en_curso = self.v.en_curso
@@ -594,6 +612,17 @@ placeholder="Buscar CVE, componente o texto" aria-label="Buscar vulnerabilidades
     GRUPO_PLAN = {"pendiente_aprobacion": "decidir", "analizando": "curso", "verificando": "curso",
                   "aplicando": "curso", "aplicado": "aplicado", "error": "fallo", "fallo_aplicacion": "fallo"}
 
+    @staticmethod
+    def _celda_consumo(p) -> str:
+        cl = p.get("claude") or {}
+        t = cl.get("total") or {}
+        if not cl.get("llamadas"):
+            return '<td class="num" data-v="0"><span class="muted">—</span></td>'
+        d5 = (t.get("delta") or {}).get("five_hour")
+        modelo = consumo.NOMBRE_MODELO.get(cl.get("modelo"), cl.get("modelo") or "")
+        return (f'<td class="num" data-v="{t.get("coste_usd") or 0}"><span class="mono">{E(consumo.usd(t.get("coste_usd")))}</span>'
+                f'<div class="muted peq">{E(modelo)}{(" · 5 h +" + E(consumo.pct(d5))) if d5 is not None else ""}</div></td>')
+
     def _tabla_planes(self, planes: list, id_: str, ctx) -> str:
         filas = []
         for p in planes:
@@ -616,13 +645,82 @@ placeholder="Buscar CVE, componente o texto" aria-label="Buscar vulnerabilidades
                 f'<td class="num" data-v="{len(p["cambios"])}">{cambios}</td>'
                 f'<td>{V.estado_verif((p.get("verificacion") or {}).get("estado"))}</td>'
                 f'<td data-v="{E(p["estado"])}">{V.estado_plan(p["estado"])}</td>'
+                f'{self._celda_consumo(p)}'
                 f'<td data-v="{E(p.get("creado", ""))}"><span class="mono peq">{E(_hora(p.get("creado")))}</span></td>'
                 f'<td class="accion">{boton}</td></tr>')
         cabecera = (V.th("Componente") + V.th("Versión actual → propuesta") + V.th("Vulns.", "num", "num")
-                    + V.th("Cambios", "num", "num") + V.th("Verificación") + V.th("Estado") + V.th("Creado")
+                    + V.th("Cambios", "num", "num") + V.th("Verificación") + V.th("Estado")
+                    + V.th("Consumo", "num", "num") + V.th("Creado")
                     + "<th><span class='sr'>Acción</span></th>")
         return (f'<div class="tabla"><table id="{id_}" class="ancha"><thead><tr>{cabecera}</tr></thead>'
                 f'<tbody>{"".join(filas)}</tbody></table></div>')
+
+    def _tarjeta_consumo(self, p) -> str:
+        """Modelo, razonamiento, lo estimado antes de empezar y lo gastado de verdad (plan y equivalente API)."""
+        cl = p["claude"]
+        est, llamadas, t = cl.get("estimacion") or {}, cl.get("llamadas") or [], cl.get("total") or {}
+        nombre_m = consumo.NOMBRE_MODELO.get(cl.get("modelo"), cl.get("modelo") or "—")
+        nombre_e = consumo.NOMBRE_ESFUERZO.get(cl.get("esfuerzo"), cl.get("esfuerzo") or "—")
+        filas = [f"<dt>Modelo</dt><dd>{E(nombre_m)} <span class='mono peq muted'>{E(cl.get('modelo') or '')}</span></dd>",
+                 f"<dt>Razonamiento</dt><dd>{E(nombre_e)}</dd>"]
+        barras = ""
+        if llamadas:
+            primera, ultima = llamadas[0], llamadas[-1]
+            for k, nombre in consumo.VENTANAS.items():
+                antes, despues = (primera.get("antes") or {}).get(k), (ultima.get("despues") or {}).get(k)
+                if despues is not None and k in (t.get("delta") or {}):
+                    antes = max(0.0, despues - t["delta"][k])
+                reinicio = consumo.hora_reinicio((ultima.get("reinicio") or {}).get(k))
+                barras += V.barra_uso(f"Ventana {nombre}" if k == "five_hour" else "Límite semanal", antes, despues,
+                                      f"se reinicia {reinicio}" if reinicio else "")
+            tk = t.get("tokens") or {}
+            filas += [f"<dt>Llamadas</dt><dd>{len(llamadas)}"
+                      f"{' (análisis + reintento)' if len(llamadas) > 1 else ''}</dd>",
+                      f"<dt>Duración</dt><dd>{(t.get('duracion_s') or 0) / 60:.1f} min</dd>",
+                      f"<dt>Tokens</dt><dd class='peq'><span class='mono'>{tk.get('entrada', 0) + tk.get('cache_escritura', 0) + tk.get('cache_lectura', 0):,}</span> de entrada "
+                      f"(<span class='mono'>{tk.get('cache_lectura', 0):,}</span> de caché) · "
+                      f"<span class='mono'>{tk.get('salida', 0):,}</span> de salida</dd>".replace(",", "."),
+                      f"<dt>Si fuera por API</dt><dd><b class='mono'>{E(consumo.usd(t.get('coste_usd')))}</b>"
+                      f" <span class='muted peq'>no se cobra: va con tu plan</span></dd>"]
+        if est:
+            filas.append(f"<dt>Estimado antes</dt><dd class='peq'><span class='mono'>{E(consumo.usd(est.get('coste_usd')))}</span>"
+                         + "".join(f" · {nombre} +{consumo.pct(est['plan'][k]['delta'])}"
+                                   for k, nombre in (("five_hour", "5 h"), ("seven_day", "semana"))
+                                   if (est.get("plan") or {}).get(k, {}).get("delta") is not None) + "</dd>")
+        if not llamadas:
+            barras = ('<p class="muted" style="margin:0 0 12px">'
+                      + ("Claude está trabajando: el consumo real aparecerá al terminar."
+                         if p["estado"] in TRANSITORIOS else "No hay datos de consumo de esta ejecución.") + "</p>")
+        return V.tarjeta(barras + f'<dl class="dl" style="margin-top:16px">{"".join(filas)}</dl>',
+                         "Consumo de Claude", icono_nombre="pulso")
+
+    def _tarjeta_uso_plan(self) -> str:
+        """Estado actual del plan de Claude (última medición) y lo gastado por el vigilante."""
+        g = self.v.gestor.consumo
+        lim = g.limites()
+        hist = g.datos.get("historial") or []
+        if not hist and not lim["ventanas"]:
+            return ""
+        barras = "".join(
+            V.barra_uso("Ventana de 5 horas" if k == "five_hour" else "Límite semanal", None,
+                        (lim["ventanas"].get(k) or {}).get("uso"),
+                        ("reiniciada desde la última medición" if (lim["ventanas"].get(k) or {}).get("reiniciada") else
+                         f"se reinicia {consumo.hora_reinicio((lim['ventanas'].get(k) or {}).get('reinicio'))}"
+                         if (lim["ventanas"].get(k) or {}).get("reinicio") else ""))
+            for k in consumo.VENTANAS)
+        hace7 = (dt.datetime.now() - dt.timedelta(days=7)).isoformat(timespec="seconds")
+        semana = [h for h in hist if h.get("fecha", "") >= hace7]
+        coste7 = sum(h.get("coste_usd") or 0 for h in semana)
+        delta7 = sum((h.get("delta") or {}).get("seven_day", 0) for h in semana)
+        medido = (_hora(dt.datetime.fromtimestamp(lim["fecha"]).isoformat(timespec="seconds"))
+                  if lim.get("fecha") else "—")
+        resumen = (f'<dl class="dl" style="margin-top:16px"><dt>Últimos 7 días</dt><dd>{len(semana)} ejecución(es) · '
+                   f'+{consumo.pct(delta7)} del límite semanal</dd>'
+                   f'<dt>Si fuera por API</dt><dd><b class="mono">{E(consumo.usd(coste7))}</b> en 7 días · '
+                   f'<span class="mono">{E(consumo.usd(sum(h.get("coste_usd") or 0 for h in hist)))}</span> en total</dd>'
+                   f'<dt>Medido</dt><dd>{E(medido)} <span class="muted peq">(se actualiza con cada ejecución; '
+                   f'incluye tu uso de Claude fuera del vigilante)</span></dd></dl>')
+        return V.tarjeta(barras + resumen, "Uso de tu plan de Claude", icono_nombre="pulso")
 
     def correcciones(self, ctx):
         planes = self._datos(ctx)[2]
@@ -653,6 +751,7 @@ placeholder="Buscar CVE, componente o texto" aria-label="Buscar vulnerabilidades
                   'Entonces propone cambios concretos y los justifica uno a uno; el vigilante los prueba en una copia con contenedores de '
                   'prueba. Tú apruebas o rechazas cada cambio (o todos). Solo entonces se aplica, con copia de seguridad '
                   'y posibilidad de revertir.</p></div></div>')
+        cuerpo += self._tarjeta_uso_plan()
         return self.envolver("Correcciones", explic + cuerpo, "/correcciones", ctx,
                              subtitulo="Planes de corrección que has pedido a Claude",
                              acciones=self._boton_resolver_app(ctx),
@@ -720,6 +819,8 @@ Valora una versión posterior antes de aprobar.</p></div></div>''')
         # columna lateral: verificación, compatibilidad, aplicación, vulnerabilidades, registro
         lateral = [V.tarjeta(self._timeline(ver.get("pasos")) + self._deprecaciones(ver) + self._previas(p),
                              "Verificación en copia", V.estado_verif(ver.get("estado")), icono_nombre="capas")]
+        if p.get("claude"):
+            lateral.append(self._tarjeta_consumo(p))
         compat = []
         for clave in ("compatibilidad", "compatibilidad_objetivo"):
             for aviso in (p.get(clave) or {}).get("avisos", []):
@@ -1058,6 +1159,8 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
             if ruta == "/api/estado":
                 return self._enviar(200, json.dumps({**vigilante.estado, "mantenimiento": vigilante.mant.info()},
                                                     ensure_ascii=False), "application/json")
+            if ruta == "/api/claude/estimacion":
+                return self._enviar(200, json.dumps(panel.estimacion(q), ensure_ascii=False), "application/json")
             if ruta.startswith("/plan/"):
                 try:
                     p = panel.plan(ruta.split("/")[2], ctx)
@@ -1111,9 +1214,10 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
                 if form.get("confirmar") != "si":
                     msg = "Falta confirmar: no se ha pedido nada a Claude."
                 elif form.get("app"):
-                    msg = vigilante.gestor.solicitar_app(form["app"], por)
+                    msg = vigilante.gestor.solicitar_app(form["app"], por, form.get("modelo"), form.get("esfuerzo"))
                 else:
-                    msg = vigilante.gestor.solicitar_componente(form.get("clave", ""), por)
+                    msg = vigilante.gestor.solicitar_componente(form.get("clave", ""), por, form.get("modelo"),
+                                                                form.get("esfuerzo"))
                 return self._redirigir(f"/correcciones?msg={urllib.parse.quote(msg)}", self._cookie)
             if ruta == "/api/escanear":
                 if not vigilante.en_curso:

@@ -1,6 +1,6 @@
 """APIs falsas para probar el flujo completo sin clave ni bot real.
 
-- ClaudeFalso: un ejecutable que imita a `claude -p --output-format json`: devuelve un plan de
+- ClaudeFalso: un ejecutable que imita a `claude -p --output-format stream-json`: devuelve un plan de
   corrección en `structured_output` y guarda argumentos, entrada y entorno de cada ejecución.
 - TelegramFalso: simula la Bot API (sendMessage, editMessageText, getUpdates,
   answerCallbackQuery). Las pruebas «pulsan» botones con pulsar().
@@ -154,7 +154,18 @@ def cli_falsa(registro):
         plan = {**PLAN_TWIG, "cambios": [], "estrategia": "sin propuesta"}
     with open(registro, "a") as f:
         f.write(json.dumps({"args": sys.argv[1:], "entrada": texto, "entorno": dict(os.environ)}) + "\n")
-    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "structured_output": plan}))
+    # como `--output-format stream-json`: eventos de límites del plan y el resultado con tokens y coste
+    n = sum(1 for _ in open(registro))           # cada llamada gasta un poco más de las ventanas
+    limites = {"status": "allowed", "unifiedWindows": {
+        "five_hour": {"utilization": round(0.20 + 0.03 * n, 2), "resetsAt": 4102444800, "status": "allowed"},
+        "seven_day": {"utilization": round(0.10 + 0.01 * n, 2), "resetsAt": 4102444800, "status": "allowed"}}}
+    print(json.dumps({"type": "system", "subtype": "init", "model": "claude-opus-5-5"}))
+    print(json.dumps({"type": "rate_limit_event", "rate_limit_info": limites}))
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "structured_output": plan,
+                      "total_cost_usd": 0.4213, "num_turns": 3,
+                      "usage": {"input_tokens": 12, "output_tokens": 9000, "cache_creation_input_tokens": 30000,
+                                "cache_read_input_tokens": 60000, "server_tool_use": {"web_search_requests": 2}},
+                      "modelUsage": {"claude-opus-5-5": {"costUSD": 0.4213}}}))
 
 
 class ClaudeFalso:
