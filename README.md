@@ -12,6 +12,7 @@
   <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-4338ca">
   <img alt="Runs on Docker" src="https://img.shields.io/badge/runs%20on-Docker-4338ca">
   <img alt="Fixes with Claude Code" src="https://img.shields.io/badge/fixes%20with-Claude%20Code-4338ca">
+  <a href="LICENSE"><img alt="MIT License" src="https://img.shields.io/badge/license-MIT-4338ca"></a>
 </p>
 
 ---
@@ -172,3 +173,7 @@ python3 pruebas/prueba_flujo.py            # full flow with simulated Docker, Cl
 | [`docs/DISENO.md`](docs/DISENO.md) | Full design document |
 
 > The dashboard, notifications, configuration keys and design document are currently in Spanish.
+
+## License
+
+[MIT](LICENSE)
