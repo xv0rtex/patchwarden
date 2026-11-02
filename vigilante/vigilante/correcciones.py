@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import logging
-import os
 import queue
 import threading
 import time
@@ -17,7 +16,6 @@ from . import claude, compatibilidad, consumo, telegram
 from .aplicar import Aplicador, ErrorAplicacion
 from .modelo import ORDEN_SEVERIDAD, Componente
 from .planes import Planes, aprobados, pendientes
-from .verificacion import Verificador
 
 log = logging.getLogger("vigilante.correcciones")
 
@@ -29,8 +27,6 @@ class Gestor:
         self.planes = Planes(vigilante.datos)
         self.consumo = consumo.Consumo(vigilante.datos)
         self._tamanos: dict = {}       # (raiz, paquete) -> (instante, caracteres de contexto)
-        self.verificador = Verificador(self.cfg, vigilante.datos)
-        self.aplicador = Aplicador(self.cfg, vigilante.datos, self.verificador)
         self.bot = telegram.Bot(self.cfg["avisos"], self._boton)
         self.cola: queue.Queue = queue.Queue()
         self.cerrojo_aplicar = threading.Lock()
@@ -105,7 +101,7 @@ class Gestor:
             return "plan", abierto["id"]
         if not claude.disponible(self.cfg["claude"]):
             return "sin_clave", "Falta Claude Code con sesión iniciada o token"
-        if not self._raiz(self._como_objeto(comp)):
+        if not self._raiz(comp):
             return "sin_codigo", "Sin código del proyecto montado"
         return "disponible", ""
 
@@ -124,12 +120,13 @@ class Gestor:
 
     def _tamano_peticion(self, comp: dict) -> int:
         """Caracteres aproximados de lo que se le enviará a Claude (para estimar el coste)."""
-        raiz = self._raiz(self._como_objeto(comp))
-        clave = (raiz, comp["nombre"])
+        raiz = self._raiz(comp)
+        clave = (comp.get("equipo", ""), raiz, comp["nombre"])
         previo = self._tamanos.get(clave)
         if not previo or time.monotonic() - previo[0] > 600:
             try:
-                n = len(claude.contexto_ficheros(raiz, comp["nombre"])) if raiz else 0
+                eq = self.equipo_de(comp)
+                n = len(eq.contexto(raiz, comp["nombre"])) if raiz and eq else 0
             except OSError:
                 n = 0
             previo = self._tamanos[clave] = (time.monotonic(), n)
@@ -172,7 +169,7 @@ class Gestor:
             return f"Ya hay un plan en curso para {comp['nombre']}: míralo en Correcciones."
         if estado != "disponible":
             return f"No se puede resolver {comp['nombre']}: {dato.lower()}."
-        raiz = self._raiz(self._como_objeto(comp))
+        raiz = self._raiz(comp)
         plan = self.planes.crear(comp, self._vulns_de(clave), raiz)
         plan["solicitado_por"] = por
         m, e = self.eleccion(modelo, esfuerzo)
@@ -242,15 +239,19 @@ class Gestor:
         return consumo.texto_estimacion(self.consumo.estimar(m, e, self._tamano_peticion(comp),
                                                              self.cfg["claude"].get("investigar_web", True)))
 
+    def equipo_de(self, x):
+        """Equipo (servidor) de un componente, como objeto o dict, o de un plan."""
+        if isinstance(x, dict) and "componente" in x:
+            x = x["componente"]
+        id_ = x.get("equipo", "") if isinstance(x, dict) else getattr(x, "equipo", "")
+        return self.v.equipo(id_)
+
     def _raiz(self, comp) -> str:
         """Carpeta del proyecto de la app del componente ('' si no hay código montado que modificar)."""
-        rutas = [r for r in self.cfg["deteccion"].get("rutas_proyecto") or [] if os.path.isdir(r)]
-        if comp.app and self.v.apps_dirs.get(comp.app) in rutas:
-            return self.v.apps_dirs[comp.app]
-        for r in rutas:
-            if comp.detalle.startswith(r.rstrip("/") + "/"):
-                return r
-        return rutas[0] if len(rutas) == 1 else ""      # una sola app: sin ambigüedad
+        eq = self.equipo_de(comp)          # con el dict original: _como_objeto no conserva el equipo
+        if eq is None:
+            return ""
+        return eq.raiz(self._como_objeto(comp) if isinstance(comp, dict) else comp)
 
     def _trabajador(self):
         while True:
@@ -275,11 +276,13 @@ class Gestor:
         plan["compatibilidad"] = compatibilidad.revisar(self.v.cache, plan["componente"], minima, runtimes)
         self.planes.evento(plan, f"revisión automática de compatibilidad hacia {minima or '¿?'}")
 
-        capacidades = self.verificador.capacidades()
+        eq = self.equipo_de(plan)
+        capacidades = eq.capacidades()
+        contexto = eq.contexto(plan["raiz"], plan["componente"]["nombre"])
         cfg_claude = self._cfg_claude(plan)
         uso: dict = {}
         try:
-            analisis = claude.analizar(cfg_claude, plan, runtimes, capacidades, uso)
+            analisis = claude.analizar(cfg_claude, plan, runtimes, capacidades, contexto, uso)
         except claude.ErrorClaude as e:
             plan["estado"] = "error"
             self._registrar_consumo(plan, "analisis", uso)
@@ -298,7 +301,7 @@ class Gestor:
 
         plan["estado"] = "verificando"
         self.planes.guardar(plan)
-        plan["verificacion"] = self.verificador.verificar(plan)
+        plan["verificacion"] = eq.verificar(plan)
         self.planes.evento(plan, f"verificación: {plan['verificacion']['estado']}")
 
         if plan["verificacion"]["estado"] in ("fallo", "parcial") and self.cfg["claude"].get("reintento_si_falla", True):
@@ -306,11 +309,11 @@ class Gestor:
                               f"{p['detalle']}\n{p.get('salida', '')[-1500:]}" for p in plan["verificacion"]["pasos"])
             uso = {}
             try:
-                analisis = claude.corregir(cfg_claude, plan, runtimes, capacidades, fallo, uso)
+                analisis = claude.corregir(cfg_claude, plan, runtimes, capacidades, contexto, fallo, uso)
                 self._registrar_consumo(plan, "reintento", uso)
                 previa = plan["verificacion"]
                 self._incorporar(plan, analisis, runtimes)
-                plan["verificacion"] = self.verificador.verificar(plan)
+                plan["verificacion"] = eq.verificar(plan)
                 plan["verificacion"]["intento_previo"] = {"estado": previa["estado"], "pasos": previa["pasos"]}
                 self.planes.evento(plan, f"Claude corrigió el plan tras el fallo; nueva verificación: "
                                          f"{plan['verificacion']['estado']}")
@@ -387,12 +390,15 @@ class Gestor:
 
     def aplicar(self, plan_id, por, en_segundo_plano=True) -> str:
         """Aplica los cambios APROBADOS. Solo se llama desde una acción explícita del usuario."""
-        if self.cfg["aplicacion"].get("solo_lectura"):
+        plan = self.planes.obtener(plan_id)
+        eq = self.equipo_de(plan)
+        if eq is None:
+            return "El equipo de este plan ya no está registrado: no se puede aplicar."
+        if eq.solo_lectura:
             return ("Este vigilante está instalado en modo solo propuestas y no puede modificar tus apps. "
                     "Para permitir aplicar cambios, ejecuta de nuevo el instalador con --permitir-aplicar.")
-        plan = self.planes.obtener(plan_id)
         try:
-            self.aplicador.comprobar_decisiones(plan)
+            Aplicador.comprobar_decisiones(plan)
         except ErrorAplicacion as e:
             return f"No se aplica: {e}"
         if not self.cerrojo_aplicar.acquire(blocking=False):
@@ -415,7 +421,7 @@ class Gestor:
     def _aplicar(self, plan_id, por):
         plan = self.planes.obtener(plan_id)
         try:
-            ap = self.aplicador.aplicar(plan, por)
+            ap = self.equipo_de(plan).aplicar(plan, por)
         except ErrorAplicacion as e:
             plan["estado"] = "pendiente_aprobacion"
             self.planes.evento(plan, f"no se aplicó: {e}", por)
@@ -455,7 +461,10 @@ class Gestor:
         if not self.cerrojo_aplicar.acquire(blocking=False):
             return "Hay una aplicación en curso; espera a que termine."
         try:
-            r = self.aplicador.revertir(plan, por)
+            eq = self.equipo_de(plan)
+            if eq is None:
+                raise ErrorAplicacion("el equipo de este plan ya no está registrado")
+            r = eq.revertir(plan, por)
         except ErrorAplicacion as e:
             return f"No se puede revertir: {e}"
         finally:

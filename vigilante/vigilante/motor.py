@@ -7,10 +7,10 @@ import logging
 import os
 import threading
 
-from . import claude, detectar_docker, detectar_ficheros, detectar_http, fuentes
+from . import claude, fuentes
 from .avisos import Avisador, texto_hallazgo
+from .equipos import LOCAL, Equipo, EquipoLocal
 from .http import Cache
-from .mantenimiento import Mantenimiento
 from .versiones import partes
 from .modelo import ORDEN_SEVERIDAD, PRIORIDAD_ORIGEN, Componente, Hallazgo
 
@@ -29,14 +29,31 @@ class Vigilante:
         os.makedirs(self.datos, exist_ok=True)
         self.cache = Cache(self.datos)
         self.avisador = Avisador(cfg["avisos"], g["nombre_web"])
-        self.mant = Mantenimiento(cfg["mantenimiento"], g["nombre_web"])
+        # servidores vigilados: de momento solo este (el central añadirá los equipos con agente)
+        self.equipos: dict[str, Equipo] = {LOCAL: EquipoLocal(cfg, self.datos)}
         self.ruta_estado = os.path.join(self.datos, "estado.json")
         self.estado = self._cargar_estado()
         self.cerrojo = threading.Lock()
         self.en_curso = False
-        self.apps_dirs: dict[str, str] = {}      # app -> carpeta de su proyecto (la rellena detectar)
         from .correcciones import Gestor
         self.gestor = Gestor(self)
+
+    @property
+    def local(self) -> Equipo:
+        return self.equipos[LOCAL]
+
+    @property
+    def mant(self):
+        """Modo mantenimiento del equipo local."""
+        return self.local.mant
+
+    @property
+    def apps_dirs(self) -> dict[str, str]:
+        """{app: carpeta de su proyecto} de todos los equipos (según la última detección)."""
+        return {app: d for e in self.equipos.values() for app, d in e.apps_dirs.items()}
+
+    def equipo(self, id_: str | None) -> Equipo | None:
+        return self.equipos.get(id_ or LOCAL)
 
     # ------------------------------------------------------------------ estado
     def _cargar_estado(self):
@@ -53,19 +70,9 @@ class Vigilante:
 
     # ------------------------------------------------------------------ 1. detectar
     def detectar(self) -> list[Componente]:
-        d = self.cfg["deteccion"]
         comps: list[Componente] = []
-        sock = d.get("docker_socket", "")
-        if d.get("docker") and (sock.startswith(("tcp://", "http://")) or os.path.exists(sock)):
-            comps += detectar_docker.detectar(d)
-        rutas = d.get("rutas_proyecto") or []
-        # {carpeta: app}: lo configurado y lo que dicen las etiquetas de compose (solo carpetas montadas)
-        apps = {**{k: v for k, v in detectar_docker.mapa_apps(d).items() if k in rutas}, **(d.get("apps") or {})}
-        self.apps_dirs = {v: k for k, v in apps.items()}
-        comps += detectar_ficheros.detectar(rutas, apps)
-        comps += detectar_http.detectar(d.get("url_web", ""))
-        for nombre, version in (d.get("manual") or {}).items():
-            comps.append(Componente(nombre, str(version), "runtime", origen="manual", detalle="configuración"))
+        for e in self.equipos.values():
+            comps += e.detectar()
         return fusionar(comps)
 
     # ------------------------------------------------------------------ 2. buscar

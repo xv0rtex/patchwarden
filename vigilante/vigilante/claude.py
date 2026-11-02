@@ -156,7 +156,9 @@ def _sesion_de_suscripcion(cfg: dict, binario: str) -> bool:
     if previo and time.monotonic() - previo[0] < 60:
         return previo[1]
     try:
-        r = subprocess.run([binario, "auth", "status"], env=_entorno(cfg), capture_output=True, text=True, timeout=20)
+        # stdin cerrado: si no, hereda el del proceso y un `claude` que lea la entrada se queda esperando
+        r = subprocess.run([binario, "auth", "status"], env=_entorno(cfg), stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=20)
         estado = json.loads(r.stdout)
         valido = bool(estado.get("loggedIn")) and estado.get("authMethod") == "claude.ai"
     except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
@@ -210,7 +212,8 @@ def _recortar_lock(texto, paquete):
     return "[… extracto …]\n" + texto[max(0, i - 300): i + 2500] + "\n[… extracto …]"
 
 
-def construir_peticion(plan: dict, runtimes: dict, capacidades: str) -> str:
+def construir_peticion(plan: dict, runtimes: dict, capacidades: str, contexto: str) -> str:
+    """contexto: ficheros del proyecto ya leídos por el equipo (contexto_ficheros en el servidor de la app)."""
     c = plan["componente"]
     vulns = "\n".join(
         f"- {h['id']} · {h['severidad']} · CVSS {h.get('cvss')} · explotada (KEV): {'sí' if h.get('kev') else 'no'}"
@@ -238,7 +241,7 @@ def construir_peticion(plan: dict, runtimes: dict, capacidades: str) -> str:
 {capacidades}
 
 ## Ficheros del proyecto (rutas relativas a la raíz)
-{contexto_ficheros(plan['raiz'], c['nombre'])}"""
+{contexto}"""
 
 
 # ------------------------------------------------------------------ llamada
@@ -340,15 +343,17 @@ def _llamar(cfg: dict, peticion: str, uso: dict | None = None) -> dict:
     return plan
 
 
-def analizar(cfg: dict, plan: dict, runtimes: dict, capacidades: str, uso: dict | None = None) -> dict:
-    return _llamar(cfg, construir_peticion(plan, runtimes, capacidades), uso)
+def analizar(cfg: dict, plan: dict, runtimes: dict, capacidades: str, contexto: str,
+             uso: dict | None = None) -> dict:
+    return _llamar(cfg, construir_peticion(plan, runtimes, capacidades, contexto), uso)
 
 
-def corregir(cfg: dict, plan: dict, runtimes: dict, capacidades: str, fallo: str, uso: dict | None = None) -> dict:
+def corregir(cfg: dict, plan: dict, runtimes: dict, capacidades: str, contexto: str, fallo: str,
+             uso: dict | None = None) -> dict:
     """Segunda oportunidad: se le enseña su plan y por qué falló la verificación."""
     previo = {k: plan["analisis"][k] for k in ("version_objetivo", "estrategia")}
     previo["cambios"] = plan["cambios_originales"]
-    return _llamar(cfg, f"""{construir_peticion(plan, runtimes, capacidades)}
+    return _llamar(cfg, f"""{construir_peticion(plan, runtimes, capacidades, contexto)}
 
 ## Tu plan anterior
 <plan_anterior>
