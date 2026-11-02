@@ -13,6 +13,8 @@ campos de CAMPOS_DEL_EQUIPO; así un equipo remoto puede devolverlos y el centra
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 
@@ -26,6 +28,19 @@ log = logging.getLogger("vigilante.equipos")
 
 LOCAL = ""          # id del equipo local
 CAMPOS_DEL_EQUIPO = ("verificacion", "verificaciones_previas", "aplicacion")
+
+
+def huella_verificacion(ver: dict | None) -> str:
+    """Resumen de todo lo que el aplicador toma de una verificación (diffs, ficheros, hashes de producción).
+    El agente guarda la huella de lo que él mismo verificó y no aplica nada con otra huella."""
+    ver = ver or {}
+    datos = {
+        "cambios": sorted(int(n) for n in ver.get("cambios_verificados") or []),
+        "por_cambio": {str(n): {k: r.get(k) for k in ("aplica", "diff_final", "ficheros")}
+                       for n, r in sorted((ver.get("por_cambio") or {}).items())},
+        "hashes": ver.get("hashes_originales") or {},
+    }
+    return hashlib.sha256(json.dumps(datos, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 class Equipo:

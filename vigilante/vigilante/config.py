@@ -98,6 +98,11 @@ DEFECTO = {
         "webhook": "",                  # alternativa: URL a la que hacer POST al activar
         "solo_kev_o_epss": True,        # en auto, exigir además KEV o EPSS alto (evita falsas alarmas)
     },
+    "central": {                        # solo para el AGENTE (python -m vigilante --agente)
+        "url": "",                      # https://panel-central.ejemplo
+        "codigo": "",                   # código de alta de un solo uso (Ajustes › Equipos en el central)
+        "permitir_http": False,         # http:// solo con localhost, salvo que se permita aquí (p. ej. en una VPN)
+    },
     "panel": {
         "activo": True,
         "puerto": 8080,
@@ -139,6 +144,8 @@ ENTORNO = {
     "VIGILANTE_PANEL_PUERTO": ("panel", "puerto"),
     "VIGILANTE_PANEL_USUARIO": ("panel", "usuario"),
     "VIGILANTE_PANEL_CLAVE": ("panel", "clave"),
+    "VIGILANTE_CENTRAL": ("central", "url"),
+    "VIGILANTE_CODIGO": ("central", "codigo"),
 }
 
 

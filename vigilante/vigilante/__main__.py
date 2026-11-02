@@ -3,6 +3,8 @@
   python -m vigilante              -> servicio: ciclo al arrancar y cada N horas + panel
   python -m vigilante --una-vez    -> un ciclo y salir (cron, CI)
   python -m vigilante --detectar   -> solo enseña qué versiones detecta (sin consultar CVE)
+  python -m vigilante --agente --central https://central --codigo XXXX
+                                   -> agente de este servidor para un panel central
 """
 import argparse
 import json
@@ -20,11 +22,16 @@ def main():
     ap.add_argument("-c", "--config", help="ruta al vigilante.toml")
     ap.add_argument("--una-vez", action="store_true", help="hacer un ciclo y salir")
     ap.add_argument("--detectar", action="store_true", help="solo detectar versiones")
+    ap.add_argument("--agente", action="store_true", help="funcionar como agente de un panel central")
+    ap.add_argument("--central", help="URL del panel central (agente)")
+    ap.add_argument("--codigo", help="código de alta de un solo uso (agente)")
     ap.add_argument("-v", "--verbose", action="store_true")
     a = ap.parse_args()
     logging.basicConfig(level=logging.DEBUG if a.verbose else logging.INFO,
                         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s", stream=sys.stdout)
     cfg = config.cargar(a.config)
+    if a.agente:
+        return agente_main(cfg, a)
     v = Vigilante(cfg)
 
     if a.detectar:
@@ -48,6 +55,23 @@ def main():
             logging.exception("Error en el ciclo; se reintentará en el siguiente")
         # se lee en cada vuelta: se puede cambiar desde Ajustes sin reiniciar
         parar.wait(float(cfg["general"].get("intervalo_horas", 6)) * 3600)
+
+
+def agente_main(cfg, a):
+    from .agente import Agente, ErrorAgente
+    if a.central:
+        cfg["central"]["url"] = a.central
+    if a.codigo:
+        cfg["central"]["codigo"] = a.codigo
+    try:
+        ag = Agente(cfg)
+        signal.signal(signal.SIGTERM, lambda *_: ag.parar.set())
+        signal.signal(signal.SIGINT, lambda *_: ag.parar.set())
+        ag.ejecutar()
+    except ErrorAgente as e:
+        logging.error("%s", e)
+        sys.exit(1)
+    sys.exit(3 if ag.revocado else 0)      # 3: el central ya no acepta este equipo
 
 
 if __name__ == "__main__":

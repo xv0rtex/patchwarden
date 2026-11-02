@@ -17,11 +17,13 @@ class Componente:
     detalle: str = ""        # de dónde exactamente (contenedor, fichero…)
     contenedor: str = ""
     app: str = ""            # app (proyecto docker compose) a la que pertenece
+    equipo: str = ""         # id del equipo (servidor) donde está; "" = este mismo servidor
 
     @property
     def clave(self) -> str:
         base = f"{self.ecosistema or self.tipo}:{self.nombre}@{self.version}"
-        return f"{self.app}::{base}" if self.app else base
+        clave = f"{self.app}::{base}" if self.app else base
+        return f"{self.equipo}~{clave}" if self.equipo else clave
 
     def to_dict(self):
         d = asdict(self)

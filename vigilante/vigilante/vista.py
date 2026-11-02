@@ -598,7 +598,7 @@ border-bottom:2px solid transparent;margin-bottom:-1px;white-space:nowrap;text-d
 .pestanas a:focus-visible{outline:2px solid var(--acc);outline-offset:-2px;border-radius:8px 8px 0 0}
 .ajustes-g{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(320px,100%),1fr));gap:16px 24px}
 .ajustes-g .campo{margin-top:0}
-.form-estrecho{max-width:440px}.form-estrecho .campo:first-child{margin-top:0}
+.form-estrecho{max-width:440px}.card-destacada{border-color:var(--acc);box-shadow:0 0 0 1px var(--acc)}.campo input.mono{font-family:var(--mono);font-size:12.5px}.form-estrecho .campo:first-child{margin-top:0}
 .campo .ayuda{font-weight:400;color:var(--muted);font-size:12.5px}
 .campo input:disabled,.campo select:disabled{background:var(--neu-bg);color:var(--muted);cursor:not-allowed}
 .campo input:focus,.campo select:focus,.campo textarea:focus{outline:2px solid var(--acc);outline-offset:1px}

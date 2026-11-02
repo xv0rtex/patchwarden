@@ -14,6 +14,7 @@ import time
 
 from . import claude, compatibilidad, consumo, telegram
 from .aplicar import Aplicador, ErrorAplicacion
+from .equipos_remotos import ErrorEquipo
 from .modelo import ORDEN_SEVERIDAD, Componente
 from .planes import Planes, aprobados, pendientes
 
@@ -86,7 +87,7 @@ class Gestor:
     @staticmethod
     def _como_objeto(d: dict) -> Componente:
         return Componente(**{k: d[k] for k in ("nombre", "version", "tipo", "ecosistema", "origen", "detalle",
-                                               "contenedor", "app") if k in d})
+                                               "contenedor", "app", "equipo") if k in d})
 
     def _vulns_de(self, clave: str) -> list[dict]:
         return [v for v in self.v.estado.get("hallazgos", {}).values() if v["componente"] == clave]
@@ -277,8 +278,15 @@ class Gestor:
         self.planes.evento(plan, f"revisión automática de compatibilidad hacia {minima or '¿?'}")
 
         eq = self.equipo_de(plan)
-        capacidades = eq.capacidades()
-        contexto = eq.contexto(plan["raiz"], plan["componente"]["nombre"])
+        try:
+            if eq is None:
+                raise ErrorEquipo("el equipo de este componente ya no está registrado")
+            capacidades = eq.capacidades()
+            contexto = eq.contexto(plan["raiz"], plan["componente"]["nombre"])
+        except ErrorEquipo as e:
+            plan["estado"] = "error"
+            self.planes.evento(plan, f"no se pudieron leer los ficheros del proyecto: {e}")
+            return
         cfg_claude = self._cfg_claude(plan)
         uso: dict = {}
         try:
@@ -301,7 +309,7 @@ class Gestor:
 
         plan["estado"] = "verificando"
         self.planes.guardar(plan)
-        plan["verificacion"] = eq.verificar(plan)
+        plan["verificacion"] = self._verificar(eq, plan)
         self.planes.evento(plan, f"verificación: {plan['verificacion']['estado']}")
 
         if plan["verificacion"]["estado"] in ("fallo", "parcial") and self.cfg["claude"].get("reintento_si_falla", True):
@@ -313,7 +321,7 @@ class Gestor:
                 self._registrar_consumo(plan, "reintento", uso)
                 previa = plan["verificacion"]
                 self._incorporar(plan, analisis, runtimes)
-                plan["verificacion"] = eq.verificar(plan)
+                plan["verificacion"] = self._verificar(eq, plan)
                 plan["verificacion"]["intento_previo"] = {"estado": previa["estado"], "pasos": previa["pasos"]}
                 self.planes.evento(plan, f"Claude corrigió el plan tras el fallo; nueva verificación: "
                                          f"{plan['verificacion']['estado']}")
@@ -324,6 +332,15 @@ class Gestor:
         plan["estado"] = "pendiente_aprobacion"
         self.planes.evento(plan, "esperando aprobación del usuario (no se ha tocado la web)")
         self.notificar(plan)
+
+    @staticmethod
+    def _verificar(eq, plan) -> dict:
+        """Verificación en el equipo; si el equipo no responde, cuenta como verificación fallida."""
+        try:
+            return eq.verificar(plan)
+        except ErrorEquipo as e:
+            return {"estado": "fallo", "pasos": [{"paso": "Equipo", "ok": False, "detalle": str(e)}],
+                    "por_cambio": {}, "cambios_verificados": [], "hashes_originales": {}}
 
     def _incorporar(self, plan, analisis, runtimes):
         cambios = analisis.pop("cambios", [])

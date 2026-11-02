@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import time
 
 from . import consumo
 from . import vista as V
@@ -9,8 +10,10 @@ from .ajustes import PESTANAS, enmascarar
 
 E = V.E
 
+PATRON_NOMBRE = 'pattern="[a-z0-9][a-z0-9\\-]{0,31}"'      # \- : válido también con la bandera v
 ORDEN = [("general", "General", "resumen"), ("avisos", "Avisos", "chat"), ("claude", "Claude", "robot"),
-         ("consumo", "Consumo", "pulso"), ("reglas", "Reglas", "escudo"), ("cuenta", "Cuenta", "usuario")]
+         ("consumo", "Consumo", "pulso"), ("reglas", "Reglas", "escudo"), ("equipos", "Equipos", "capas"),
+         ("cuenta", "Cuenta", "usuario")]
 NOMBRES = {k: n for k, n, _ in ORDEN}
 # grupo -> canal que se puede probar desde su tarjeta
 PRUEBAS = {"Telegram": "telegram", "Webhook": "webhook", "Email": "email"}
@@ -158,10 +161,100 @@ def _cuenta(panel, ctx) -> str:
             + V.tarjeta(clave, "Cambiar la contraseña", icono_nombre="candado"))
 
 
-def pagina(panel, ctx, pestana: str) -> str | None:
+def _hace(epoch) -> str:
+    if not epoch:
+        return "nunca"
+    s = max(0, int(time.time() - epoch))
+    if s < 90:
+        return "hace un momento"
+    if s < 5400:
+        return f"hace {s // 60} min"
+    if s < 172800:
+        return f"hace {s // 3600} h"
+    return f"hace {s // 86400} días"
+
+
+def _url_central(panel, ctx) -> str:
+    return (panel.v.cfg["panel"].get("url_publica") or ctx.get("url_base") or "https://TU-PANEL").rstrip("/")
+
+
+def _equipos(panel, ctx, alta: dict | None) -> str:
+    v = panel.v
+    reg = v.registro
+    activos = reg.activos()
+    local = v.local
+    comps = v.estado.get("componentes", [])
+    n_local = sum(1 for c in comps if not c.get("equipo"))
+    apps_local = {c.get("app") for c in comps if not c.get("equipo") and c.get("app")}
+    filas = [f'<tr data-texto="este servidor"><td><b>Este servidor</b><div class="muted peq">donde corre el panel</div></td>'
+             f'<td>{V.pill("Local", "ok")}</td><td class="num">{len(apps_local)}</td><td class="num">{n_local}</td>'
+             f'<td>{V.pill("Solo propuestas", "neutro") if local.solo_lectura else V.pill("Puede aplicar", "info")}</td>'
+             f'<td class="muted peq">—</td><td></td></tr>']
+    boton_revocar = V.boton("Revocar", "peligro", "x", attrs='style="padding:4px 12px"')
+    for id_, e in sorted(activos.items(), key=lambda kv: kv[1]["nombre"]):
+        inv = e.get("inventario") or {}
+        cs = inv.get("componentes") or []
+        apps = {c.get("app") or "" for c in cs}      # sin app = se agrupan bajo el nombre del equipo
+        estado = (V.pill("En línea", "ok") if reg.en_linea(id_)
+                  else V.pill(f"Sin conexión · {_hace(reg.ultimo_contacto(id_))}", "mal"))
+        if not inv and reg.en_linea(id_):
+            estado = V.pill("Conectado, detectando…", "info")
+        permiso = (V.pill("Solo propuestas", "neutro") if inv.get("solo_lectura", True)
+                   else V.pill("Puede aplicar", "info"))
+        revocar = (f'<form method="post" action="/ajustes/equipo-revocar" data-confirmar="El agente de '
+                   f'{E(e["nombre"], quote=True)} dejará de poder conectarse y sus apps desaparecerán del panel '
+                   f'en el próximo análisis. Para volver a añadirlo hará falta un código nuevo." '
+                   f'data-titulo="Revocar {E(e["nombre"], quote=True)}" data-boton="Revocar">'
+                   f'<input type="hidden" name="id" value="{E(id_, quote=True)}">'
+                   f'{boton_revocar}</form>')
+        filas.append(
+            f'<tr data-texto="{E((e["nombre"] + " " + e.get("hostname", "")).lower(), quote=True)}">'
+            f'<td><b>{E(e["nombre"])}</b><div class="muted peq">{E(e.get("hostname") or "")}'
+            f'{" · agente " + E(e["version"]) if e.get("version") else ""}</div></td>'
+            f'<td>{estado}</td><td class="num">{len(apps)}</td><td class="num">{len(cs)}</td><td>{permiso}</td>'
+            f'<td><span class="peq">{E(_hace(e.get("inventario_en")))}</span></td>'
+            f'<td class="accion">{revocar}</td></tr>')
+    cab = (V.th("Equipo") + V.th("Estado") + V.th("Apps", "num", "num") + V.th("Componentes", "num", "num")
+           + V.th("Permisos") + V.th("Último inventario") + "<th><span class='sr'>Acción</span></th>")
+    tabla = (f'<div class="tabla tabla-sola"><table id="t-equipos" class="ancha"><thead><tr>{cab}</tr></thead>'
+             f'<tbody>{"".join(filas)}</tbody></table></div>')
+    lista = V.tarjeta(tabla, f"Equipos ({len(activos) + 1})", icono_nombre="capas")
+
+    if alta:
+        url = _url_central(panel, ctx)
+        cmd_docker = f"bash instalar.sh --agente --central {url} --codigo {alta['codigo']}"
+        cmd_python = f"python3 -m vigilante --agente --central {url} --codigo {alta['codigo']}"
+        nuevo = V.tarjeta(
+            f'<p style="margin-top:0">Ejecuta esto en el servidor <b>{E(alta["nombre"])}</b>, en la carpeta de '
+            f'Patchwarden. El código <b>solo vale una vez y caduca en 1 hora</b>; no se volverá a mostrar.</p>'
+            f'<label class="campo"><span>Con Docker (recomendado)</span><input class="mono" readonly value="{E(cmd_docker, quote=True)}" '
+            f'onclick="this.select()"></label>'
+            f'<label class="campo"><span>Sin Docker</span><input class="mono" readonly value="{E(cmd_python, quote=True)}" '
+            f'onclick="this.select()"></label>'
+            f'<p class="muted peq" style="margin-bottom:0">El agente solo hace conexiones salientes a {E(url)}: no hay '
+            f'que abrir puertos en ese servidor. Aparecerá en la lista en cuanto se conecte.</p>',
+            f"Código para {alta['nombre']}", icono_nombre="llave", clase="card-destacada")
+    else:
+        nuevo = ""
+    form = (f'<form method="post" action="/ajustes/equipo-alta"><div class="ajustes-g">'
+            f'<label class="campo"><span>Nombre del equipo</span><input name="nombre" required maxlength="32" '
+            + PATRON_NOMBRE + ' placeholder="p. ej. servidor-web-2" autocomplete="off">'
+            f'<span class="ayuda">Minúsculas, números y guiones. Sus apps se verán como «nombre/app».</span></label>'
+            f'</div><div class="form-pie">{V.boton("Crear código de alta", "primario", "llave")}</div></form>')
+    explic = (f'<div class="banner banner-info">{V.icono("info", 22)}<div><p>Instala un agente en cada servidor con '
+              'Docker y lo gestionas todo desde aquí. El agente detecta, verifica y aplica en su servidor; este '
+              'panel busca las vulnerabilidades, avisa y le pide a Claude las correcciones. Nada se aplica sin tu '
+              'aprobación, y un agente en modo «solo propuestas» no aplica nada aunque se lo pida el panel.</p></div></div>')
+    return explic + nuevo + lista + V.tarjeta(form, "Añadir un equipo", icono_nombre="capas")
+
+
+def pagina(panel, ctx, pestana: str, alta: dict | None = None) -> str | None:
     if pestana not in NOMBRES:
         return None
-    if pestana == "consumo":
+    if pestana == "equipos":
+        cuerpo = _equipos(panel, ctx, alta)
+        sub = "Servidores con agente que este panel vigila"
+    elif pestana == "consumo":
         cuerpo = _consumo(panel)
         sub = "Lo que ha gastado Claude: estado de tu plan y cada ejecución"
     elif pestana == "cuenta":

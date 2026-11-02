@@ -21,9 +21,10 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import claude, consumo, panel_ajustes
+from . import api_agente, claude, consumo, panel_ajustes
 from . import vista as V
 from .ajustes import Ajustes, ErrorAjuste
+from .equipos_remotos import ErrorEquipo
 from .usuarios import Cuenta, ErrorCuenta
 from .modelo import ORDEN_SEVERIDAD
 from .planes import aprobados, pendientes
@@ -310,10 +311,13 @@ tu decisión</b><p>Claude ha preparado {n_c} cambio(s) y se han verificado en un
         # gráfico: vulnerabilidades por componente y gravedad
         por_comp: dict[str, dict] = {}
         nombres = {}
+        varias = not ctx.get("app") and len(apps) > 1
         for h in hs:
             por_comp.setdefault(h["componente"], {}).setdefault(h["severidad"], 0)
             por_comp[h["componente"]][h["severidad"]] += 1
-            nombres[h["componente"]] = f"{h['nombre']} {h['version']}"
+            # con varias apps a la vista, el mismo «php 8.1.2» puede estar en varias: se dice en cuál
+            nombres[h["componente"]] = (f"{h['nombre']} {h['version']}"
+                                        + (f" · {h['app']}" if varias and h.get("app") else ""))
         orden = sorted(por_comp, key=lambda k: (-por_comp[k].get("CRITICA", 0), -sum(por_comp[k].values())))[:9]
         tope = max((sum(por_comp[k].values()) for k in orden), default=1)
         barras = "".join(V.barra_gravedad(por_comp[k], tope, nombres[k],
@@ -331,10 +335,12 @@ tu decisión</b><p>Claude ha preparado {n_c} cambio(s) y se han verificado en un
         ramas = ""
         if sin_soporte:
             ramas = '<div style="margin-top:16px">' + "".join(
-                f'<div class="callout">{V.icono("alerta", 18)}<div><b>{E(c["nombre"])} {E(c["version"])}</b> sin parches '
+                f'<div class="callout">{V.icono("alerta", 18)}<div><b>{E(c["nombre"])} {E(c["version"])}</b>'
+                f'{(" · " + E(c["app"])) if varias and c.get("app") else ""} sin parches '
                 f'de seguridad desde {E(str((est["info_ramas"][c["clave"]] or {}).get("fin_soporte")))}</div></div>'
                 for c in sin_soporte) + "</div>"
-        lateral = V.tarjeta(ew + ramas, "Estado de la web", icono_nombre="pulso")
+        lateral = V.tarjeta(ew + ramas, "Estado de la web" if len(self.v.equipos) == 1
+                            else "Estado de este servidor", icono_nombre="pulso")
         partes.append(f'<div class="grid g2">{grafico}{lateral}</div>')
 
         # correcciones pendientes + lo más urgente
@@ -414,9 +420,19 @@ tu decisión</b><p>Claude ha preparado {n_c} cambio(s) y se han verificado en un
                                  "info")
             return V.tarjeta(cuerpo, titulo, icono_nombre=ic)
         escaneo = _hora(ciclo.get("fin")) if ciclo else "—"
+        varios = len(self.v.equipos) > 1           # con agentes: columna «Equipo» con su estado
         filas = []
         for app, resumen in apps.items():
             d = self._datos_web(app)
+            celda_eq = ""
+            if varios:
+                id_eq = next((c.get("equipo", "") for c in d["comps"]), "")
+                eq = self.v.equipo(id_eq)
+                nombre_eq = "Este servidor" if not id_eq else (eq.nombre if eq else "(revocado)")
+                estado_eq = ("" if not id_eq else V.pill("En línea", "ok") if eq and eq.en_linea()
+                             else V.pill("Sin conexión", "mal"))
+                celda_eq = (f'<td data-l="Equipo" data-v="{E(nombre_eq)}"><span class="peq">{E(nombre_eq)}</span>'
+                            f'{"<div>" + estado_eq + "</div>" if estado_eq else ""}</td>')
             texto_e, tono = self.ESTADOS_WEB[d["estado"]]
             orden_e = list(self.ESTADOS_WEB).index(d["estado"])
             pend = (f'<div class="peq" style="margin-top:4px">{V.pill(str(resumen["pend"]) + " pendiente(s) de aprobar", "aviso")}</div>'
@@ -431,12 +447,12 @@ tu decisión</b><p>Claude ha preparado {n_c} cambio(s) y se han verificado en un
             filas.append(
                 f'<tr data-href="{E(href)}" data-estado="{d["estado"]}" data-texto="{E(texto)}">'
                 f'<td class="td-n" data-v="{E(app)}"><div class="web-n"><b><a href="{E(href)}">{E(app)}</a></b>{url}</div></td>'
-                f'<td data-l="Versión" data-v="{E(c["nombre"] if c else "")}">{self._celda_version(d)}</td>'
+                f'{celda_eq}<td data-l="Versión" data-v="{E(c["nombre"] if c else "")}">{self._celda_version(d)}</td>'
                 f'<td data-l="Estado" data-v="{orden_e}">{V.pill(texto_e, tono)}{pend}</td>{celdas_sev}'
                 f'<td data-l="Último escaneo" data-v="{E((ciclo or {}).get("fin", ""))}"><span class="mono peq">{E(escaneo)}</span></td></tr>')
         filtros = V.filtros("#t-webs", "Buscar web, URL o componente", "webs",
                             [("estado", k, V.ICONO_TONO[t], n) for k, (n, t) in self.ESTADOS_WEB.items()], abajo=True)
-        cabecera = (V.th("Web") + V.th("Versión actual → última") + V.th("Estado", "num")
+        cabecera = (V.th("Web") + (V.th("Equipo") if varios else "") + V.th("Versión actual → última") + V.th("Estado", "num")
                     + "".join(V.th(n + "s", "num", "num") for _, n in V.SEVERIDADES) + V.th("Último escaneo"))
         tabla = (f'{filtros}<div class="tabla tabla-sola"><table id="t-webs" class="ancha"><thead><tr>{cabecera}'
                  f'</tr></thead><tbody>{"".join(filas)}</tbody></table></div>'
@@ -1077,6 +1093,7 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
     cfg_panel = vigilante.cfg["panel"]
     host = host or cfg_panel.get("host") or "0.0.0.0"
     limite = LimiteIntentos()
+    limite_altas = LimiteIntentos()
     cuenta = panel.cuenta
 
     class Manejador(BaseHTTPRequestHandler):
@@ -1196,6 +1213,8 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
             q = {k: v[0] for k, v in urllib.parse.parse_qs(url.query, keep_blank_values=True).items()}
             if ruta == "/salud":
                 return self._enviar(200, "ok", "text/plain")
+            if ruta.startswith("/api/agente/"):
+                return api_agente.get(self, ruta, vigilante.registro)
             api = panel.token_ok(self.headers.get("X-Token", ""))
             if not cuenta.existe() and not api:
                 if ruta == "/configuracion-inicial":
@@ -1247,6 +1266,8 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
 
         def do_POST(self):
             ruta = urllib.parse.urlparse(self.path).path
+            if ruta.startswith("/api/agente/"):
+                return api_agente.post(self, ruta, vigilante.registro, limite_altas, self._ip())
             largo = min(int(self.headers.get("Content-Length") or 0), 20_000)
             form = {k: v[0] for k, v in urllib.parse.parse_qs(self.rfile.read(largo).decode(),
                                                                keep_blank_values=True).items()}
@@ -1365,6 +1386,25 @@ def arrancar(vigilante, puerto: int, host: str | None = None, extension=None):
                     else:
                         cuenta.cambiar_clave(form.get("actual", ""), form.get("nueva", ""), self._sid())
                         msg = "Contraseña cambiada. Las demás sesiones se han cerrado."
+                elif accion == "equipo-alta":
+                    try:
+                        codigo = vigilante.registro.crear_alta(form.get("nombre", ""))
+                    except ErrorEquipo as e:
+                        return self._redirigir(f"/ajustes/equipos?msg={urllib.parse.quote(str(e))}")
+                    ctx = self._ctx({"msg": "Código creado: cópialo ahora, no se volverá a mostrar."}, self._sesion())
+                    ctx["url_base"] = f"{'https' if self._https() else 'http'}://{self.headers.get('Host', '')}"
+                    alta = {"nombre": form.get("nombre", "").strip().lower(), "codigo": codigo}
+                    return self._enviar(200, panel_ajustes.pagina(panel, ctx, "equipos", alta))
+                elif accion == "equipo-revocar":
+                    pestana = "equipos"
+                    if form.get("confirmar") != "si":
+                        msg = "Falta confirmar: no se ha revocado nada."
+                    else:
+                        try:
+                            vigilante.registro.revocar(form.get("id", ""))
+                            msg = "Equipo revocado: su agente ya no puede conectarse."
+                        except ErrorEquipo as e:
+                            msg = str(e)
                 elif accion == "sesiones":
                     pestana = "cuenta"
                     n = cuenta.cerrar_otras(self._sid())
