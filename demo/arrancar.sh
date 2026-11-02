@@ -9,13 +9,13 @@ DIR="${DEMO_DIR:-/tmp/vig-demo}"; PUERTO="${DEMO_PUERTO:-8090}"; PUERTO_FICHEROS
 mkdir -p "$DIR"
 VENV="${VENV:-/work/.home/venv-vigilante}"
 if [ ! -x "$VENV/bin/python" ]; then
-  python3 -m venv "$VENV" && "$VENV/bin/pip" install -q "anthropic>=2.3,<3"
+  python3 -m venv "$VENV"
 fi
 CF="${CLOUDFLARED:-$(command -v cloudflared || echo /work/.home/bin/cloudflared)}"
 bash "$AQUI/parar.sh" >/dev/null 2>&1 || true
 
 CLAVE="${DEMO_CLAVE:-$(python3 -c 'import secrets;print(secrets.token_urlsafe(9))')}"
-USUARIO="${DEMO_USUARIO:-diego}"
+USUARIO="${DEMO_USUARIO:-demo}"
 umask 077; echo "$CLAVE" > "$DIR/clave"; umask 022
 
 URL=""

@@ -7,7 +7,7 @@ import logging
 import os
 import threading
 
-from . import detectar_docker, detectar_ficheros, detectar_http, fuentes
+from . import claude, detectar_docker, detectar_ficheros, detectar_http, fuentes
 from .avisos import Avisador, texto_hallazgo
 from .http import Cache
 from .mantenimiento import Mantenimiento
@@ -183,7 +183,7 @@ class Vigilante:
         av = self.cfg["avisos"]
         def prop(h):
             return "Claude preparará un plan de corrección (te llegará para aprobar)" \
-                if self.cfg["claude"].get("api_key") and h.critico else ""
+                if claude.disponible(self.cfg["claude"]) and h.critico else ""
 
         # primero lo que se está explotando ya (KEV), luego por CVSS y probabilidad de explotación
         criticos = sorted((h for h in nuevos + escalados if h.critico),

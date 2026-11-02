@@ -165,5 +165,61 @@ class Correcciones(unittest.TestCase):
             self.assertIn("ya no admite", msg)
 
 
+class ClaudeCode(unittest.TestCase):
+    """Claude se usa por Claude Code con la suscripción: nunca por API ni con herramientas locales."""
+
+    def _falso(self, salida, codigo=0):
+        import tempfile
+        carpeta = tempfile.mkdtemp()
+        ruta = os.path.join(carpeta, "claude")
+        with open(ruta, "w") as f:
+            f.write(f"#!/bin/sh\ncat > /dev/null\ncat <<'FIN'\n{salida}\nFIN\nexit {codigo}\n")
+        os.chmod(ruta, 0o755)
+        return {"comando": ruta, "oauth_token": "t"}
+
+    def test_entorno_sin_claves_de_api_ni_secretos(self):
+        from unittest import mock
+        from vigilante import claude
+        malas = {"ANTHROPIC_API_KEY": "x", "ANTHROPIC_AUTH_TOKEN": "x", "CLAUDE_CODE_USE_BEDROCK": "1",
+                 "TELEGRAM_TOKEN": "x", "VIGILANTE_PANEL_CLAVE": "x"}
+        with mock.patch.dict(os.environ, malas):
+            env = claude._entorno({"oauth_token": "t"})
+        self.assertFalse(set(malas) & set(env))
+        self.assertEqual(env["CLAUDE_CODE_OAUTH_TOKEN"], "t")
+
+    def test_sin_herramientas_locales(self):
+        from vigilante import claude
+        args = claude._argumentos({"investigar_web": False}, "claude")
+        self.assertEqual(args[args.index("--tools") + 1], "")
+        self.assertNotIn("--allowedTools", args)
+        self.assertNotIn("--bare", args)                 # --bare ignora la suscripción
+        args = claude._argumentos({}, "claude")
+        self.assertEqual(args[args.index("--tools") + 1], "WebSearch,WebFetch")
+
+    def test_devuelve_el_plan(self):
+        from vigilante import claude
+        cfg = self._falso('{"is_error": false, "structured_output": {"cambios": []}}')
+        self.assertEqual(claude._llamar(cfg, "hola"), {"cambios": []})
+
+    def test_errores(self):
+        from vigilante import claude
+        casos = [('{"is_error": true, "api_error_status": 429, "result": "x"}', 1, "límite de uso"),
+                 ('{"is_error": true, "api_error_status": 401, "result": "x"}', 1, "sesión válida"),
+                 ('{"is_error": false, "result": "sin esquema"}', 0, "no devolvió un plan"),
+                 ("esto no es json", 1, "falló")]
+        for salida, codigo, texto in casos:
+            with self.assertRaisesRegex(claude.ErrorClaude, texto):
+                claude._llamar(self._falso(salida, codigo), "hola")
+
+    def test_una_sesion_de_console_no_cuenta(self):
+        from vigilante import claude
+        cfg = self._falso('{"loggedIn": true, "authMethod": "console"}')
+        cfg["oauth_token"] = ""
+        self.assertFalse(claude.disponible(cfg))
+        cfg = self._falso('{"loggedIn": true, "authMethod": "claude.ai"}')
+        cfg["oauth_token"] = ""
+        self.assertTrue(claude.disponible(cfg))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Instalador del Vigilante de vulnerabilidades. No hay que editar nada.
 #
-#   curl -fsSL https://raw.githubusercontent.com/USUARIO/REPO/main/instalar.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/xv0rtex/patchwarden/main/instalar.sh | bash
 #   (o, con el proyecto ya descargado)   bash instalar.sh
 #
 # Qué hace:
@@ -16,7 +16,7 @@
 set -euo pipefail
 
 # --- Lo único que fija quien publica el proyecto (una vez): de dónde se descarga
-REPO="${VIGILANTE_REPO:-https://github.com/USUARIO/vigilante-cve}"
+REPO="${VIGILANTE_REPO:-https://github.com/xv0rtex/patchwarden}"
 RAMA="${VIGILANTE_RAMA:-main}"
 
 DIR=""; PUERTO=""; LOCAL=""; APLICAR=""; SOLO=""; TUNEL=""; PREGUNTAR=1; ACCION="instalar"
@@ -94,13 +94,13 @@ pedir() {  # nombre-variable  pregunta  [secreto]
   fi
   printf -v "$1" '%s' "$v"
 }
-if [ -n "$PREGUNTAR" ] && [ -r /dev/tty ] && [ -z "$(leer TELEGRAM_TOKEN)$(leer ANTHROPIC_API_KEY)" ]; then
+if [ -n "$PREGUNTAR" ] && [ -r /dev/tty ] && [ -z "$(leer TELEGRAM_TOKEN)$(leer CLAUDE_CODE_OAUTH_TOKEN)" ]; then
   msg "Dos datos opcionales (puedes saltarlos y funcionará igual, solo con panel):"
 fi
 pedir TELEGRAM_TOKEN "Token del bot de Telegram (lo da @BotFather)" s
 [ -n "${TELEGRAM_TOKEN:-}" ] && pedir TELEGRAM_CHAT_ID "Tu chat id de Telegram (lo da @userinfobot)"
-pedir ANTHROPIC_API_KEY "Clave de Anthropic para poder pedirle correcciones a Claude (solo actuará cuando se lo pidas)" s
-export TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}" TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}" ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}"
+pedir CLAUDE_CODE_OAUTH_TOKEN "Token de Claude Code para pedirle correcciones a Claude con tu plan, sin API (genéralo con: claude setup-token)" s
+export TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}" TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}" CLAUDE_CODE_OAUTH_TOKEN="${CLAUDE_CODE_OAUTH_TOKEN:-}"
 
 # --- 3. Descubrimiento y generación de la configuración (en un contenedor efímero)
 msg "Buscando tus apps en Docker..."
@@ -112,7 +112,7 @@ ARGS=(--salida /salida)
 [ -n "$TUNEL" ] && ARGS+=(--tunel)
 SALIDA="$(docker run --rm --network host \
   -v /var/run/docker.sock:/var/run/docker.sock:ro -v "$DIR":/salida \
-  -e TELEGRAM_TOKEN -e TELEGRAM_CHAT_ID -e ANTHROPIC_API_KEY \
+  -e TELEGRAM_TOKEN -e TELEGRAM_CHAT_ID -e CLAUDE_CODE_OAUTH_TOKEN \
   vigilante:local python -m vigilante.instalar "${ARGS[@]}")" || fallo "No se pudo descubrir el entorno Docker."
 echo "$SALIDA" | grep -v '^RESULTADO '
 RES="$(echo "$SALIDA" | sed -n 's/^RESULTADO //p')"

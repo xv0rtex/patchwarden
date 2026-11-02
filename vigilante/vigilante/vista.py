@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import html
 import re
+import urllib.parse
 
 E = html.escape
 
@@ -188,9 +189,9 @@ def pagina(titulo: str, cuerpo: str, *, activo: str = "/", web: str = "", subtit
              'autocomplete="current-password" placeholder="VIGILANTE_PANEL_TOKEN"></label>') if dialogo_token else ""
     return f"""<!doctype html><html lang="es"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">{meta}
-<title>{E(titulo)} · Vigilante</title><style>{CSS}</style></head>
+<title>{E(titulo)} · Patchwarden</title><link rel="icon" href="{FAVICON}"><style>{CSS}</style></head>
 <body><div class="app">
-<aside class="side"><a class="marca" href="/">{icono("escudo", 26)}<span><b>Vigilante</b><small>{E(web)}</small></span></a>
+<aside class="side"><a class="marca" href="/">{LOGO_SVG.format(t=30)}<span><b>Patchwarden</b><small>{E(web)}</small></span></a>
 <nav>{''.join(nav)}</nav>
 <div class="side-pie">{icono("candado", 14)}<span>Nada se aplica sin tu aprobación</span></div></aside>
 <div class="main">{aviso}
@@ -203,6 +204,19 @@ def pagina(titulo: str, cuerpo: str, *, activo: str = "/", web: str = "", subtit
 <div class="dlg-b"><button class="btn btn-secundario" value="no">Cancelar</button>
 <button class="btn btn-primario" value="si" id="dlg-ok">Confirmar</button></div></form></dialog>
 <script>{JS}</script></body></html>"""
+
+
+# Logo de Patchwarden (el mismo que assets/logo.svg): escudo con una tirita
+LOGO_SVG = ('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="{t}" height="{t}" class="logo" aria-hidden="true">'
+            '<defs><linearGradient id="pw-g" x1="12" y1="6" x2="52" y2="58" gradientUnits="userSpaceOnUse">'
+            '<stop offset="0" stop-color="#6d6af8"/><stop offset="1" stop-color="#3b2fc9"/></linearGradient></defs>'
+            '<path d="M32 4.5 53 12.2v17.6c0 13.4-8.8 24-21 29.7C19.8 53.8 11 43.2 11 29.8V12.2Z" fill="url(#pw-g)" '
+            'stroke="url(#pw-g)" stroke-width="3" stroke-linejoin="round"/><g transform="rotate(-45 32 31.5)">'
+            '<rect x="15" y="24.5" width="34" height="14" rx="7" fill="#fff"/>'
+            '<rect x="25.5" y="24.5" width="13" height="14" fill="#dcdcff"/><g fill="#4a42dd">'
+            '<circle cx="29" cy="28.5" r="1.25"/><circle cx="35" cy="28.5" r="1.25"/>'
+            '<circle cx="29" cy="34.5" r="1.25"/><circle cx="35" cy="34.5" r="1.25"/></g></g></svg>')
+FAVICON = "data:image/svg+xml," + urllib.parse.quote(LOGO_SVG.format(t=64))
 
 
 CSS = r"""
@@ -226,7 +240,7 @@ a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
 .side{width:248px;flex:none;background:var(--side);color:var(--side-ink);display:flex;flex-direction:column;
 position:sticky;top:0;height:100vh;padding:18px 14px}
 .marca{display:flex;gap:11px;align-items:center;color:#fff;padding:6px 8px 20px;text-decoration:none!important}
-.marca .ico{color:#8b93ff}.marca b{display:block;font-size:17px;letter-spacing:.2px}
+.marca .ico{color:#8b93ff}.marca .logo{flex:none}.marca b{display:block;font-size:17px;letter-spacing:.2px}
 .marca small{display:block;color:#8d95ab;font-size:12px;max-width:170px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .side nav{display:flex;flex-direction:column;gap:3px}
 .side nav a{display:flex;align-items:center;gap:11px;padding:9px 11px;border-radius:10px;color:var(--side-ink);

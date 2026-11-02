@@ -1,5 +1,5 @@
 ---
-title: "Vigilante de vulnerabilidades para webs en Docker"
+title: "Patchwarden: vigilante de vulnerabilidades para webs en Docker"
 subtitle: "Diseño y prototipo · v2: corrección con Claude con aprobación del usuario"
 date: "27 de octubre de 2026"
 ---
@@ -14,7 +14,7 @@ pocas horas):
 2. **Consulta** fuentes públicas de vulnerabilidades buscando las que afectan a *esas* versiones.
 3. **Prioriza**: no es lo mismo un CVE teórico que uno que se está explotando ahora mismo.
 4. **Avisa siempre**, por consola y por los canales que se configuren (Telegram, webhook, email).
-5. Si hay clave de API de Anthropic, el usuario puede **pedirle a Claude** (nunca lo hace solo) que
+5. Con Claude Code y un plan de Claude (sin API), el usuario puede **pedirle a Claude** (nunca lo hace solo) que
    proponga los cambios que lo corrigen, cada uno justificado. El vigilante los **verifica en una copia** con contenedores de prueba. **Nada se
    aplica sin aprobación explícita** del usuario (Telegram o panel). Una vez aprobado, se aplica
    con copia de seguridad previa y posibilidad de volver atrás (§6).
@@ -111,8 +111,8 @@ revisados, o casos en los que la función vulnerable no se usa).
 
 1. **Claude solo trabaja cuando el usuario lo pide.** Tras cada análisis el vigilante únicamente avisa y *ofrece*
    la resolución (botón en Telegram y botón «Resolver con Claude» por componente o por app en el panel). No se
-   llama a la API hasta que el usuario pulsa y confirma, en una ventana que explica qué se envía a Anthropic
-   (vulnerabilidades y ficheros de despliegue; nunca los `.env` ni los datos) y que consume uso de la API. El
+   llama a Claude hasta que el usuario pulsa y confirma, en una ventana que explica qué se envía a Anthropic
+   (vulnerabilidades y ficheros de despliegue; nunca los `.env` ni los datos) y que consume uso de su plan de Claude. El
    modo antiguo, que preparaba planes solo, queda como opción (`[claude] modo = "auto"`) y no es el valor por defecto.
 2. **NINGÚN cambio se aplica a la web sin una aprobación explícita del usuario.**
 
@@ -175,10 +175,10 @@ aplica, siempre con una copia de seguridad previa y con posibilidad de volver at
   y el código fuente, para que busque usos de funciones deprecadas.
 
 Claude puede además **consultar en la web** los changelogs, `UPGRADE.md` y las guías de migración
-oficiales (herramientas `web_search` y `web_fetch` del servidor de Anthropic). Se le pide usar
+oficiales (herramientas `WebSearch` y `WebFetch` de Claude Code). Se le pide usar
 fuentes primarias y citarlas.
 
-**Salida:** un JSON validado por la API mediante un esquema (*structured outputs*), así que el
+**Salida:** un JSON validado por Claude Code mediante un esquema (`--json-schema`), así que el
 vigilante no tiene que interpretar texto libre:
 
 | Campo | Contenido |
@@ -194,8 +194,9 @@ vigilante no tiene que interpretar texto libre:
 | · `como_revertir`, `depende_de` | marcha atrás y orden entre cambios |
 | `pruebas_recomendadas`, `fuentes_consultadas` | qué conviene probar a mano y de dónde ha sacado la información |
 
-Modelo `claude-opus-5-5` con pensamiento adaptativo, esfuerzo alto y streaming. Si el modelo
-rechaza la petición, la API la reintenta sola con el modelo de respaldo. Las descripciones de los
+Modelo `claude-opus-5-5` con esfuerzo alto, ejecutado con `claude -p`: usa el plan de Claude y sus
+límites, y las claves de API se retiran del entorno para que nunca se cobre por uso. Claude Code
+corre en una carpeta vacía y solo con `WebSearch` y `WebFetch`, sin terminal ni acceso a ficheros. Las descripciones de los
 CVE, los ficheros y las páginas web se le marcan como **datos, no instrucciones** (protección
 contra inyección de instrucciones). Aun así, nada de lo que diga Claude se ejecuta fuera de la
 lista blanca de §6.4.
@@ -359,8 +360,8 @@ Alternativas para otras arquitecturas: ejecutar un **comando** o hacer **POST a 
 
 # 8. Prototipo: qué hay y qué se ha probado
 
-**Código** (`vigilante/`): Python 3.12 con la librería estándar y `git`. El SDK de Anthropic es la
-única dependencia y solo hace falta para las propuestas. Unas 4.000 líneas:
+**Código** (`vigilante/`): Python 3.12 con la librería estándar y `git`. No hay dependencias de Python;
+el binario de Claude Code solo hace falta para las propuestas. Unas 4.000 líneas:
 
 | Módulo | Función |
 |---|---|
@@ -414,10 +415,10 @@ Docker):
 - Segundo ciclo sin cambios: **0 avisos repetidos**.
 - Mantenimiento: activación manual desde el panel (token incorrecto → 403) y automática.
 - **Flujo de corrección completo** (`pruebas/prueba_flujo.py`, **49/49 comprobaciones**). Usa
-  Docker, la API de Claude (en streaming, como la real) y Telegram simulados; NVD, OSV y los
+  Docker, Claude Code (un ejecutable que imita `claude -p`) y Telegram simulados; NVD, OSV y los
   registros de paquetes son reales. Comprueba:
   - se crean planes para PHP y Twig y **el proyecto no cambia** hasta aprobar;
-  - la petición a Claude lleva salida estructurada, herramientas web, *fallback* y la revisión de
+  - la petición a Claude lleva salida estructurada, solo herramientas web, sin clave de API y la revisión de
     compatibilidad;
   - verificación con imagen construida, comandos de prueba, HTTP, nginx sacado del compose y
     `composer update` en contenedor con el lock regenerado;
@@ -431,8 +432,7 @@ Docker):
 - 15 pruebas unitarias sin red (`python3 -m unittest discover -s pruebas`): restricciones de
   versión, lista blanca de comandos, partición de diffs y decisiones.
 - **Falta**:
-  - probarlo con una clave real de Anthropic: aquí no hay ninguna, y el formato de la petición se
-    ha comprobado contra la API simulada;
+  - un análisis completo con Claude Code real dentro del contenedor;
   - probarlo con un Docker y un bot de Telegram reales.
 
 # 9. Limitaciones conocidas y siguientes pasos

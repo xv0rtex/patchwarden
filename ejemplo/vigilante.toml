@@ -1,5 +1,5 @@
 # Configuración del vigilante. Todo tiene valor por defecto; las variables de entorno
-# (TELEGRAM_TOKEN, ANTHROPIC_API_KEY, NVD_API_KEY…) tienen prioridad sobre este fichero.
+# (TELEGRAM_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, NVD_API_KEY…) tienen prioridad sobre este fichero.
 
 [general]
 nombre_web = "Web de ejemplo"

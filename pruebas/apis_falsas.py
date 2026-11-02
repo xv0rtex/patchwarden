@@ -1,7 +1,7 @@
 """APIs falsas para probar el flujo completo sin clave ni bot real.
 
-- ClaudeFalso: responde a POST /v1/messages en streaming SSE (como la API real) con un plan
-  de corrección en JSON. Guarda las peticiones para comprobar qué se envió.
+- ClaudeFalso: un ejecutable que imita a `claude -p --output-format json`: devuelve un plan de
+  corrección en `structured_output` y guarda argumentos, entrada y entorno de cada ejecución.
 - TelegramFalso: simula la Bot API (sendMessage, editMessageText, getUpdates,
   answerCallbackQuery). Las pruebas «pulsan» botones con pulsar().
 - WebFalsa: la web desplegada; se puede poner a responder 500 para probar el rollback.
@@ -9,6 +9,8 @@
 import json
 import os
 import queue
+import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -139,50 +141,39 @@ class _Base(BaseHTTPRequestHandler):
 
 
 # ------------------------------------------------------------------------- Claude
+def cli_falsa(registro):
+    """Lo que ejecuta el `claude` falso: registra la llamada y responde como `claude -p`."""
+    texto = sys.stdin.read()
+    if "- guzzlehttp/guzzle 7.4.0" in texto:      # 1ª vez mal; al corregir, bien
+        plan = _plan_guzzle(bueno="FALLADO" in texto)
+    elif "- php 8.1.2" in texto:
+        plan = PLAN_PHP
+    elif "- twig/twig 3.3.7" in texto:
+        plan = PLAN_TWIG
+    else:
+        plan = {**PLAN_TWIG, "cambios": [], "estrategia": "sin propuesta"}
+    with open(registro, "a") as f:
+        f.write(json.dumps({"args": sys.argv[1:], "entrada": texto, "entorno": dict(os.environ)}) + "\n")
+    print(json.dumps({"type": "result", "subtype": "success", "is_error": False, "structured_output": plan}))
+
+
 class ClaudeFalso:
     def __init__(self):
-        self.peticiones = []
-        padre = self
+        carpeta = tempfile.mkdtemp(prefix="claude-falso-")
+        self.registro = os.path.join(carpeta, "peticiones.jsonl")
+        self.comando = os.path.join(carpeta, "claude")
+        with open(self.comando, "w") as f:
+            f.write(f"#!{sys.executable}\nimport sys\n"
+                    f"sys.path.insert(0, {os.path.dirname(os.path.abspath(__file__))!r})\n"
+                    f"import apis_falsas\napis_falsas.cli_falsa({self.registro!r})\n")
+        os.chmod(self.comando, 0o755)
 
-        class M(_Base):
-            def do_POST(self):
-                cuerpo = self._leer()
-                padre.peticiones.append({"ruta": self.path, "cuerpo": cuerpo,
-                                         "beta": self.headers.get("anthropic-beta", "")})
-                texto = cuerpo["messages"][0]["content"]
-                if "- guzzlehttp/guzzle 7.4.0" in texto:      # 1ª vez mal; al corregir, bien
-                    plan = _plan_guzzle(bueno=len(cuerpo["messages"]) > 1)
-                elif "- php 8.1.2" in texto:
-                    plan = PLAN_PHP
-                elif "- twig/twig 3.3.7" in texto:
-                    plan = PLAN_TWIG
-                else:
-                    plan = {**PLAN_TWIG, "cambios": [], "estrategia": "sin propuesta"}
-                datos = json.dumps(plan, ensure_ascii=False)
-                self.send_response(200)
-                self.send_header("Content-Type", "text/event-stream")
-                self.end_headers()
-                eventos = [
-                    ("message_start", {"type": "message_start", "message": {
-                        "id": "msg_falso", "type": "message", "role": "assistant", "model": cuerpo["model"],
-                        "content": [], "stop_reason": None, "stop_sequence": None,
-                        "usage": {"input_tokens": 1000, "output_tokens": 1}}}),
-                    ("content_block_start", {"type": "content_block_start", "index": 0,
-                                             "content_block": {"type": "text", "text": ""}}),
-                ]
-                for i in range(0, len(datos), 400):
-                    eventos.append(("content_block_delta", {"type": "content_block_delta", "index": 0,
-                                                            "delta": {"type": "text_delta", "text": datos[i:i + 400]}}))
-                eventos += [("content_block_stop", {"type": "content_block_stop", "index": 0}),
-                            ("message_delta", {"type": "message_delta",
-                                               "delta": {"stop_reason": "end_turn", "stop_sequence": None},
-                                               "usage": {"output_tokens": 900}}),
-                            ("message_stop", {"type": "message_stop"})]
-                for nombre, d in eventos:
-                    self.wfile.write(f"event: {nombre}\ndata: {json.dumps(d)}\n\n".encode())
-                self.wfile.flush()
-
-        self.srv, self.url = _servidor(M)
+    @property
+    def peticiones(self):
+        if not os.path.exists(self.registro):
+            return []
+        with open(self.registro) as f:
+            return [json.loads(linea) for linea in f]
 
 
 # ------------------------------------------------------------------------- Telegram
@@ -226,7 +217,7 @@ class TelegramFalso:
     def pulsar(self, message_id, callback_data, chat=None, usuario=99):
         self.n += 1
         self.cola.put({"update_id": 1000 + self.n, "callback_query": {
-            "id": f"cq{self.n}", "data": callback_data, "from": {"id": usuario, "username": "diego"},
+            "id": f"cq{self.n}", "data": callback_data, "from": {"id": usuario, "username": "demo"},
             "message": {"message_id": message_id, "chat": {"id": int(chat or self.chat_id)}}}})
 
     def buscar(self, texto) -> list[int]:

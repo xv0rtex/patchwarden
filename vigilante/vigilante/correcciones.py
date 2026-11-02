@@ -101,7 +101,7 @@ class Gestor:
         if abierto:
             return "plan", abierto["id"]
         if not claude.disponible(self.cfg["claude"]):
-            return "sin_clave", "Falta la clave de Anthropic"
+            return "sin_clave", "Falta Claude Code con sesión iniciada o token"
         if not self._raiz(self._como_objeto(comp)):
             return "sin_codigo", "Sin código del proyecto montado"
         return "disponible", ""
@@ -409,9 +409,9 @@ class Gestor:
             if accion == "rsv":     # primer paso: explicar y pedir confirmación
                 self.bot.editar(message_id,
                                 f"<b>¿Confirmas pedir a Claude la corrección de {telegram.E(comp['nombre'])} "
-                                f"{telegram.E(comp['version'])}?</b>\n\nSe enviarán a la API de Anthropic las "
+                                f"{telegram.E(comp['version'])}?</b>\n\nSe enviarán a Anthropic, a través de Claude Code, las "
                                 "vulnerabilidades y los ficheros de despliegue del proyecto (no los .env ni los datos). "
-                                "Tiene un coste de uso de la API. No se modificará nada hasta que apruebes cada cambio.",
+                                "Consume uso de tu plan de Claude. No se modificará nada hasta que apruebes cada cambio.",
                                 [[telegram.b("Sí, resolver con Claude", "cfs", plan_id), telegram.b("Cancelar", "nop", plan_id)]])
                 return "Confirma para continuar"
             resultado = self.solicitar_componente(comp["clave"], quien)

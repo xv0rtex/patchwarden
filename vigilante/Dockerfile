@@ -1,8 +1,11 @@
 FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 # git: aplicar y comparar diffs en las copias de prueba y en el proyecto
-RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates \
+RUN apt-get update && apt-get install -y --no-install-recommends git ca-certificates curl bash \
     && rm -rf /var/lib/apt/lists/*
+# Claude Code: propone las correcciones con tu plan de Claude (CLAUDE_CODE_OAUTH_TOKEN), sin API
+ENV PATH="/root/.local/bin:$PATH" DISABLE_AUTOUPDATER=1
+RUN curl -fsSL https://claude.ai/install.sh | bash -s stable && claude --version
 # Cliente de Docker + plugin compose: solo para el comando de despliegue tras una aprobación
 COPY --from=docker:27-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker:27-cli /usr/local/libexec/docker/cli-plugins/docker-compose /usr/local/libexec/docker/cli-plugins/docker-compose

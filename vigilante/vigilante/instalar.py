@@ -28,7 +28,7 @@ C = "com.docker.compose.project"
 CWD = "com.docker.compose.project.working_dir"
 CFG = "com.docker.compose.project.config_files"
 REDES_ESPECIALES = {"bridge", "host", "none"}
-CLAVES_ENV = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "ANTHROPIC_API_KEY", "NVD_API_KEY",
+CLAVES_ENV = ["TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_CODE_OAUTH_TOKEN", "NVD_API_KEY",
               "VIGILANTE_PANEL_USUARIO", "VIGILANTE_PANEL_CLAVE", "VIGILANTE_PANEL_TOKEN", "VIGILANTE_PUERTO"]
 
 
@@ -114,7 +114,7 @@ def generar(a, d: dict, previo: dict) -> dict:
     os.makedirs(a.salida, exist_ok=True)
     puerto = int(previo.get("VIGILANTE_PUERTO") or a.puerto or 0) or puerto_libre(8090, d["publicados"])
     env = {k: previo.get(k, "") for k in CLAVES_ENV}
-    for k in ("TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "ANTHROPIC_API_KEY", "NVD_API_KEY"):
+    for k in ("TELEGRAM_TOKEN", "TELEGRAM_CHAT_ID", "CLAUDE_CODE_OAUTH_TOKEN", "NVD_API_KEY"):
         if os.environ.get(k):
             env[k] = os.environ[k]
     env["VIGILANTE_PANEL_USUARIO"] = env["VIGILANTE_PANEL_USUARIO"] or "admin"
@@ -203,7 +203,7 @@ def generar(a, d: dict, previo: dict) -> dict:
         os.chmod(ruta, 0o755)
     return {"puerto": puerto, "url": env["VIGILANTE_PANEL_URL"], "usuario": env["VIGILANTE_PANEL_USUARIO"],
             "clave": env["VIGILANTE_PANEL_CLAVE"], "telegram": bool(env["TELEGRAM_TOKEN"] and env["TELEGRAM_CHAT_ID"]),
-            "claude": bool(env["ANTHROPIC_API_KEY"])}
+            "claude": bool(env["CLAUDE_CODE_OAUTH_TOKEN"])}
 
 
 def main(argv=None):

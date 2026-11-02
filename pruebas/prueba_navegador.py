@@ -14,7 +14,7 @@ res = []
 def ok(c, t): res.append((bool(c), t)); print(("OK    " if c else "FALLO ") + t)
 with sync_playwright() as p:
     b = p.chromium.launch()
-    ctx = b.new_context(viewport={"width":1440,"height":900}, http_credentials={"username":"diego","password":CLAVE})
+    ctx = b.new_context(viewport={"width":1440,"height":900}, http_credentials={"username":"demo","password":CLAVE})
     pg = ctx.new_page(); err=[]
     pg.on("pageerror", lambda e: err.append(str(e)))
     # Claude NO trabaja solo: hay que pedirlo. Se pide php (cancelando primero) y twig desde Componentes

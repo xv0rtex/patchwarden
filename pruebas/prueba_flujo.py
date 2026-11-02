@@ -70,14 +70,14 @@ def main():
     sock = os.path.join(TMP, "docker.sock")
     docker_falso.arrancar(sock)
     claude, tg, web = apis_falsas.ClaudeFalso(), apis_falsas.TelegramFalso("1234"), apis_falsas.WebFalsa(os.path.join(TMP, "web_rota"))
-    os.environ["ANTHROPIC_BASE_URL"] = claude.url
+    os.environ["ANTHROPIC_API_KEY"] = "sk-ant-no-debe-usarse"    # aunque exista, nunca debe llegar a Claude Code
 
     from vigilante import config, panel
     from vigilante.motor import Vigilante
     cfg = config.cargar("/no/existe.toml")
     cfg["general"].update(carpeta_datos=os.path.join(TMP, "datos"), nombre_web="Web de prueba")
     cfg["deteccion"].update(docker_socket=sock, rutas_proyecto=[PROYECTO], url_web="", apps={PROYECTO: "ejemplo"})
-    cfg["claude"].update(api_key="sk-ant-falsa", max_planes_por_ciclo=2)
+    cfg["claude"].update(comando=claude.comando, oauth_token="token-falso", max_planes_por_ciclo=2)
     cfg["verificacion"].update(docker_host=sock, servicios=[{
         "nombre": "php", "contexto": "web/app", "dockerfile": "Dockerfile",
         "comandos_prueba": ["php -v", "php -l /var/www/html/index.php"],
@@ -139,12 +139,17 @@ def main():
     ok(huella(PROYECTO) == antes, "REGLA: el proyecto NO se ha tocado sin aprobación")
 
     print("\n2) Lo que se le pidió a Claude")
-    pet = claude.peticiones[0]["cuerpo"]
-    ok(pet["model"] == "claude-opus-5-5", "modelo claude-opus-5-5")
-    ok(pet["output_config"]["format"]["type"] == "json_schema", "salida estructurada con esquema JSON")
-    ok({x["name"] for x in pet.get("tools", [])} == {"web_search", "web_fetch"}, "puede leer changelogs (web_search/web_fetch)")
-    ok(pet.get("fallbacks") == "default" and "server-side-fallback" in claude.peticiones[0]["beta"], "fallback en servidor")
-    texto = pet["messages"][0]["content"]
+    pet = claude.peticiones[0]
+    args = pet["args"]
+    opcion = lambda nombre: args[args.index(nombre) + 1]
+    ok(args[0] == "-p" and opcion("--model") == "claude-opus-5-5", "Claude Code sin interfaz (-p), modelo claude-opus-5-5")
+    ok(opcion("--output-format") == "json" and "cambios" in json.loads(opcion("--json-schema"))["properties"],
+       "salida estructurada con esquema JSON")
+    ok(opcion("--tools") == "WebSearch,WebFetch" and opcion("--allowedTools") == "WebSearch,WebFetch",
+       "solo puede leer changelogs (WebSearch/WebFetch): sin terminal ni ficheros")
+    ok(pet["entorno"].get("CLAUDE_CODE_OAUTH_TOKEN") == "token-falso" and "ANTHROPIC_API_KEY" not in pet["entorno"],
+       "usa el token de la suscripción y nunca la clave de API")
+    texto = pet["entrada"]
     ok("Revisión automática de compatibilidad" in texto and '"php": "8.1.2"' in texto,
        "recibe la revisión automática de compatibilidad y las versiones desplegadas")
 
@@ -242,7 +247,7 @@ def main():
     ok(pg["verificacion"].get("intento_previo", {}).get("estado") == "fallo", "el primer plan falla en la copia")
     ok(pg["verificacion"]["estado"] == "ok" and "7.4.5" in pg["verificacion"]["por_cambio"]["1"]["diff_final"],
        "Claude lo corrige con el error de la verificación y el nuevo plan pasa")
-    ok(len(claude.peticiones[-1]["cuerpo"]["messages"]) == 3 and "FALLADO" in claude.peticiones[-1]["cuerpo"]["messages"][2]["content"],
+    ok("<plan_anterior>" in claude.peticiones[-1]["entrada"] and "FALLADO" in claude.peticiones[-1]["entrada"],
        "a Claude se le pasa su plan anterior y el resultado de la verificación")
     ok(pg["estado"] == "pendiente_aprobacion" and huella(PROYECTO) == huella_tras_revertir,
        "y vuelve a quedar pendiente de aprobación sin tocar nada")

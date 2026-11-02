@@ -56,7 +56,9 @@ DEFECTO = {
         "telegram_api": "https://api.telegram.org",
     },
     "claude": {
-        "api_key": "",                  # ANTHROPIC_API_KEY; sin clave no se generan propuestas
+        "comando": "claude",            # Claude Code; usa tu plan de Claude, nunca una clave de API
+        "oauth_token": "",              # CLAUDE_CODE_OAUTH_TOKEN (de `claude setup-token`); vacío = sesión del equipo
+        "timeout_s": 1800,              # tiempo máximo de cada análisis
         "modelo": "claude-opus-5-5",
         "esfuerzo": "high",
         "modo": "a_peticion",           # a_peticion = Claude SOLO actúa cuando el usuario lo pide (por defecto);
@@ -64,7 +66,7 @@ DEFECTO = {
         "severidad_minima": "ALTA",     # a partir de qué severidad se ofrece / se resuelve una app entera
         "max_planes_por_solicitud": 6,  # componentes máximos al pedir «resolver toda la app»
         "max_planes_por_ciclo": 3,
-        "investigar_web": True,         # leer changelogs / guías de migración con web_search/web_fetch
+        "investigar_web": True,         # leer changelogs / guías de migración con WebSearch/WebFetch
         "reintento_si_falla": True,     # si la verificación falla, Claude corrige el plan (1 vez)
     },
     "verificacion": {
@@ -126,7 +128,7 @@ ENTORNO = {
     "SMTP_USUARIO": ("avisos", "smtp_usuario"),
     "SMTP_CLAVE": ("avisos", "smtp_clave"),
     "EMAIL_PARA": ("avisos", "email_para"),
-    "ANTHROPIC_API_KEY": ("claude", "api_key"),
+    "CLAUDE_CODE_OAUTH_TOKEN": ("claude", "oauth_token"),
     "VIGILANTE_DOCKER_PRUEBAS": ("verificacion", "docker_host"),
     "VIGILANTE_RED_PRUEBAS": ("verificacion", "red"),
     "VIGILANTE_COMANDO_DESPLIEGUE": ("aplicacion", "comando_despliegue"),

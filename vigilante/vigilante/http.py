@@ -10,7 +10,7 @@ import urllib.error
 import urllib.request
 
 log = logging.getLogger("vigilante.http")
-AGENTE = "vigilante-cve/0.1 (+https://github.com/)"
+AGENTE = "patchwarden/0.1 (+https://github.com/xv0rtex/patchwarden)"
 
 
 def peticion(url, datos=None, cabeceras=None, metodo=None, timeout=30, reintentos=3, json_resp=True):

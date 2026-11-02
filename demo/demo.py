@@ -7,7 +7,7 @@ No usa ninguna clave ni acceso real:
   - La web «desplegada» es una copia del proyecto de ejemplo en /tmp/vig-demo/proyecto.
 Lo único real son las consultas públicas de vulnerabilidades (NVD, OSV, KEV, EPSS…).
 
-    DEMO_CLAVE=xxxx python3 demo/demo.py      (puerto 8090 en 127.0.0.1; usuario «diego»)
+    DEMO_CLAVE=xxxx python3 demo/demo.py      (puerto 8090 en 127.0.0.1; usuario «demo»)
 
 Sale con código 3 cuando se pide «Reiniciar demo» (el script arrancar.sh lo vuelve a lanzar).
 """
@@ -137,7 +137,7 @@ def main():
 
     # Varias apps en el mismo servidor, como en un LXC real: la web de ejemplo y dos más sin código montado
     docker_falso.CONTENEDORES.update({
-        "ddd444": {"Name": "/TripVault", "Image": "eclipse-temurin:17.0.8_7-jre", "etiquetas": True, "proyecto": "tripvault",
+        "ddd444": {"Name": "/blog-api", "Image": "eclipse-temurin:17.0.8_7-jre", "etiquetas": True, "proyecto": "blog",
                    "Env": ["JAVA_VERSION=jdk-17.0.8+7"], "sonda": "", "puertos": [{"PrivatePort": 8080, "PublicPort": 8080, "Type": "tcp"}]},
         "eee555": {"Name": "/tienda-db", "Image": "mysql:8.0.30", "etiquetas": True, "proyecto": "tienda",
                    "Env": ["MYSQL_VERSION=8.0.30"], "sonda": ""},
@@ -146,8 +146,6 @@ def main():
     docker_falso.arrancar(sock)
     claude, tg = apis_falsas.ClaudeFalso(), apis_falsas.TelegramFalso("1234")
     web = apis_falsas.WebFalsa(os.path.join(TMP, "web_rota"))
-    os.environ["ANTHROPIC_BASE_URL"] = claude.url          # la «API de Claude» es local y falsa
-    os.environ.pop("ANTHROPIC_API_KEY", None)
 
     from vigilante import config, panel
     from vigilante.motor import Vigilante
@@ -155,7 +153,7 @@ def main():
     cfg["general"].update(carpeta_datos=os.path.join(TMP, "datos"), nombre_web="Web de ejemplo (DEMO)",
                           intervalo_horas=1000)
     cfg["deteccion"].update(docker_socket=sock, rutas_proyecto=[proyecto], url_web="", apps={proyecto: "ejemplo"})
-    cfg["claude"].update(api_key="sk-ant-demo-no-es-real", max_planes_por_ciclo=2)
+    cfg["claude"].update(comando=claude.comando, oauth_token="demo-no-es-real", max_planes_por_ciclo=2)  # Claude Code falso
     cfg["verificacion"].update(docker_host=sock, servicios=[
         {"nombre": "php", "contexto": "web/app", "dockerfile": "Dockerfile",
          "comandos_prueba": ["php -v", "php -l /var/www/html/index.php"],
@@ -167,7 +165,7 @@ def main():
                              url_salud=web.url, espera_s=3)
     cfg["avisos"].update(telegram_token="DEMO", telegram_chat_id="1234", telegram_api=tg.url)
     cfg["mantenimiento"].update(carpeta=os.path.join(TMP, "mant"))
-    cfg["panel"].update(host="127.0.0.1", puerto=PUERTO, usuario=os.environ.get("DEMO_USUARIO", "diego"),
+    cfg["panel"].update(host="127.0.0.1", puerto=PUERTO, usuario=os.environ.get("DEMO_USUARIO", "demo"),
                         clave=clave, token="", url_publica=os.environ.get("DEMO_URL", ""),
                         banner="<b>DEMO</b> Docker, Claude y Telegram simulados: no se toca nada real. Claude solo actúa cuando pulsas «Resolver con Claude» · "
                                "<a href='/demo'>Ver el Telegram simulado con los botones</a>",

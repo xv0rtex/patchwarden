@@ -30,7 +30,7 @@ def detectar(url: str) -> list[Componente]:
     ctx = ssl.create_default_context()
     ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE  # webs internas con certificado propio
     try:
-        req = urllib.request.Request(url, headers={"User-Agent": "vigilante-cve/0.1"})
+        req = urllib.request.Request(url, headers={"User-Agent": "patchwarden/0.1"})
         with urllib.request.urlopen(req, timeout=15, context=ctx) as r:
             cab = r.headers
             html = r.read(200_000).decode(errors="replace")

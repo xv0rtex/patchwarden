@@ -1,110 +1,174 @@
-# Vigilante de vulnerabilidades para webs en Docker
+<p align="center">
+  <img src="assets/logo.svg" width="128" height="128" alt="Patchwarden logo">
+</p>
 
-Contenedor que corre junto a una web desplegada, detecta las versiones (PHP, nginx, Java,
-Tomcat, Node… y dependencias de Composer/npm/Maven/PyPI…), las cruza con **NVD, OSV.dev, CISA KEV,
-EPSS y endoflife.date**, **avisa siempre** y puede poner la web en **modo mantenimiento**.
+<h1 align="center">Patchwarden</h1>
 
-Si hay clave de Anthropic, puedes **pedirle a Claude** que prepare los cambios que lo corrigen, cada uno con su
-justificación (qué arregla, por qué es correcto, qué riesgo tiene y cómo revertirlo) y su revisión
-de compatibilidad. El vigilante los **verifica en una copia** con contenedores de prueba.
-**Claude nunca actúa por su cuenta**: solo trabaja cuando pulsas «Resolver con Claude» (en el panel, con una
-ventana de confirmación que explica qué se envía a Anthropic, o en Telegram, con doble confirmación). El
-vigilante únicamente te lo ofrece cuando detecta algo importante. Y **nada se aplica sin tu aprobación**: apruebas o rechazas cada cambio (o todos) desde Telegram o
-el panel, y solo entonces se aplica, con copia de seguridad previa, comprobación de la web y
-rollback.
+<p align="center">
+  <b>Finds vulnerable software in your Docker sites. Prepares the fix. You approve it.</b>
+</p>
 
-- Diseño completo: [`docs/DISENO.md`](docs/DISENO.md) (y `docs/DISENO.pdf`)
-- Código: [`vigilante/`](vigilante/)
-- Ejemplo listo para `docker compose`: [`ejemplo/`](ejemplo/)
-- Pruebas: `python3 -m unittest discover -s pruebas` y `python3 pruebas/prueba_flujo.py`
-  (flujo completo con Docker, Claude y Telegram simulados; necesita `pip install anthropic`).
-  Opcional: `pruebas/prueba_navegador.py` prueba la interfaz en Chromium (Playwright).
-- Capturas de la interfaz: [`capturas/`](capturas/)
+<p align="center">
+  <img alt="Python 3.12" src="https://img.shields.io/badge/python-3.12-4338ca">
+  <img alt="Runs on Docker" src="https://img.shields.io/badge/runs%20on-Docker-4338ca">
+  <img alt="Fixes with Claude Code" src="https://img.shields.io/badge/fixes%20with-Claude%20Code-4338ca">
+</p>
 
-## Instalación en un servidor con Docker (sin configurar nada)
+---
+
+Patchwarden is a small container that runs next to your websites. It works out which software
+versions they use, checks them against public vulnerability databases, warns you when something
+is at risk and, when you ask, gets Claude to prepare a tested fix. **Nothing changes on your server
+until you approve it.**
+
+<p align="center">
+  <img src="assets/dashboard.png" alt="Patchwarden dashboard" width="900">
+</p>
+
+## What it does
+
+1. **Finds what you run.** It detects PHP, nginx, Java, Tomcat, Node and more, plus your
+   Composer, npm, Maven and PyPI dependencies, from your containers and project files.
+2. **Checks it.** It cross-checks every version against **NVD, OSV.dev, CISA KEV, EPSS and
+   endoflife.date**, and puts first what attackers are already exploiting.
+3. **Warns you.** In the web dashboard and, if you want, on Telegram, by webhook or by email.
+   It can also put your site into **maintenance mode**.
+4. **Fixes on request.** Click *Resolver con Claude* (“Resolve with Claude”) and Claude prepares the changes. Each one
+   explains what it fixes, why it is correct, how risky it is and how to undo it.
+5. **Tests before you decide.** Patchwarden applies the changes to a copy of your project and
+   runs it in test containers.
+6. **Applies only what you approve.** You approve or reject each change from the dashboard or
+   Telegram. It takes a backup, checks that the site is still up and rolls back if it is not.
+
+> **Claude never acts on its own.** It only works when you click the button and confirm, and it
+> only proposes. It has no terminal and no access to your files.
+
+## Install on a server
+
+On a Linux server with Docker:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/USUARIO/vigilante-cve/main/instalar.sh | bash
+curl -fsSL https://raw.githubusercontent.com/xv0rtex/patchwarden/main/instalar.sh | bash
 ```
 
-El script descarga el vigilante, **descubre solo las apps que ya corren en Docker**, elige un puerto
-libre, genera la configuración y una contraseña, y lo arranca. Al final imprime la URL del panel, el
-usuario y la contraseña. Pregunta (y se puede saltar con Intro) por el token de Telegram y la clave de
-Anthropic.
+The script downloads Patchwarden, **finds the apps already running in Docker**, picks a free
+port, writes the configuration and a password, and starts everything. At the end it prints the
+dashboard URL, the username and the password. It also asks for a Telegram bot token and a
+Claude Code token; both are optional, and you can press Enter to skip them.
 
-- Por defecto **solo avisa y propone**: monta tus proyectos en solo lectura y no puede modificar nada.
-- `--permitir-aplicar`: permite aplicar cambios (siempre con tu aprobación, con copia de seguridad y rollback).
-- `--puerto N`, `--local` (panel solo en 127.0.0.1), `--solo NOMBRE` (vigilar solo una app o proyecto).
-- **Varias apps en el mismo servidor:** cada proyecto de docker compose es una *app*. El panel tiene un
-  desplegable arriba para ver una app o todas, con sus propias vulnerabilidades, componentes y correcciones.
-- Volver a ejecutarlo actualiza el vigilante, refresca las apps descubiertas y conserva tus claves.
-- `--tunel`: publica el panel en internet con un **túnel rápido de cloudflared** (gratis, sin cuenta ni
-  dominio). Al terminar imprime la URL `https://….trycloudflare.com` y, si hay Telegram, te la envía. El panel
-  siempre pide usuario y contraseña, y bloquea 5 minutos a quien falle 10 veces. La URL **cambia si se reinicia
-  el túnel**: `bash instalar.sh --url` la muestra. Para algo permanente, usa tu dominio con Cloudflare Tunnel o una VPN.
-- **Claude a petición**: con la clave de Anthropic puesta, el panel muestra «Resolver con Claude» en cada componente
-  con vulnerabilidades (y «Resolver <app> con Claude» al elegir una app), y Telegram te ofrece un botón cuando
-  aparece algo importante. No se llama a la API hasta que lo pides y confirmas. Para el modo antiguo (que prepare
-  planes solo tras cada análisis) existe `[claude] modo = "auto"`, pero no es el valor por defecto.
-- `--parar` y `--desinstalar`.
-- Quien publique el proyecto solo tiene que poner su URL de GitHub en la variable `REPO` de `instalar.sh`.
+| Option | What it does |
+|---|---|
+| *(none)* | Watches and proposes only: your projects are mounted read-only |
+| `--permitir-aplicar` | Allows approved changes to be applied (with backup and rollback) |
+| `--puerto N` | Dashboard port |
+| `--local` | Dashboard only on `127.0.0.1` |
+| `--solo NAME` | Watches a single app or project |
+| `--tunel` | Publishes the dashboard through a free Cloudflare quick tunnel |
+| `--url` | Shows the current tunnel URL |
+| `--parar` / `--desinstalar` | Stops / removes Patchwarden |
 
-## Arranque rápido (con el ejemplo)
+Running the script again updates Patchwarden, refreshes the discovered apps and keeps your
+settings. Each Docker Compose project counts as an *app*, and the dashboard lets you view one or
+all of them.
+
+## Fixes with Claude Code (no API billing)
+
+Fixes use **Claude Code with your Claude subscription** (Pro, Max or higher), not the pay-as-you-go
+API. On the computer where you use Claude, create a token:
+
+```bash
+claude setup-token
+```
+
+Put it in the `.env` file as `CLAUDE_CODE_OAUTH_TOKEN`, or paste it when the installer asks.
+
+- Each fix uses part of your plan's usage limits.
+- Any `ANTHROPIC_API_KEY` in the environment is deliberately ignored, so you are never billed per use.
+- Claude runs in an empty folder, with only web search and web fetch (to read changelogs and
+  upgrade guides). It cannot run commands or open your files.
+- Patchwarden sends the vulnerabilities and deployment files (`composer.json`, `Dockerfile`, nginx
+  config…), never `.env` files or app data. The confirmation window tells you this before anything
+  is sent.
+- The token is for **your own** use. If someone else installs Patchwarden, they should use their own
+  Claude account.
+
+Without a token, Patchwarden still detects and warns; it just does not prepare fixes.
+
+## Try it with the example
 
 ```bash
 cd ejemplo
-cp .env.ejemplo .env      # rellena Telegram, ANTHROPIC_API_KEY, token del panel… (todo opcional)
+cp .env.ejemplo .env      # Telegram, CLAUDE_CODE_OAUTH_TOKEN, dashboard token… (all optional)
 docker compose up -d --build
-docker compose logs -f vigilante
-# Web:   http://localhost:8000
-# Panel: http://localhost:8080
+# Website:   http://localhost:8000
+# Dashboard: http://localhost:8080
 ```
 
-Lanza `docker compose` **desde la carpeta `ejemplo/`**: el proyecto se monta en la misma ruta que
-en el host (`${PWD}`), para que el despliegue de cambios aprobados funcione desde el vigilante.
+Run `docker compose` **from the `ejemplo/` folder**: the project is mounted at the same path as on
+the host, so approved changes can be deployed from inside the container.
 
-**Permisos.** El ejemplo trae dos proxies del socket de Docker:
-- uno de **solo lectura** para detectar versiones;
-- otro **con escritura** para las pruebas y el despliegue.
+## Security model
 
-El segundo equivale casi a root sobre el servidor. Lo más seguro es:
-- quitarlo y verificar en otro equipo (`VIGILANTE_DOCKER_PRUEBAS=tcp://equipo-pruebas:2375`);
-- desplegar con tu CI/CD (`[aplicacion].webhook_despliegue`);
-- montar el código en solo lectura.
+- **Read-only by default.** Patchwarden only reads the Docker API through a proxy that allows
+  listing and inspecting containers.
+- **Writing is opt-in.** Testing and deploying need a second Docker proxy with write access,
+  which is close to root on the server. Safer alternatives: run the tests on another machine
+  (`VIGILANTE_DOCKER_PRUEBAS=tcp://test-host:2375`), deploy through your own CI/CD
+  (`[aplicacion].webhook_despliegue`), and mount your code read-only.
+- **Every change needs your approval**, with a backup first and an automatic rollback if the
+  site stops responding.
+- The dashboard always asks for a username and password, and locks out an address for 5 minutes
+  after 10 failed attempts.
 
-## Añadirlo a una web que ya tienes
+## Add it to an existing site
 
-1. Copia la carpeta `vigilante/` junto a tu `docker-compose.yml`.
-2. Añade los servicios `docker-proxy` y `vigilante` del ejemplo y la etiqueta
-   `vigilante.vigilar: "true"` a los contenedores de tu web.
-3. Monta tu código (para leer `composer.lock`, `package-lock.json`, `pom.xml`…). En solo lectura
-   si no quieres que el vigilante aplique nada; en ese caso solo propone y verifica.
-4. Describe en `[[verificacion.servicios]]` cómo construir y probar cada servicio, y en
-   `[aplicacion]` cómo desplegar y dónde comprobar la web.
-5. Para el modo mantenimiento, comparte el volumen `mantenimiento` con nginx y añade las líneas
-   de `ejemplo/web/nginx/default.conf`.
+1. Copy the `vigilante/` folder next to your `docker-compose.yml`.
+2. Add the `docker-proxy` and `vigilante` services from the example, and the label
+   `vigilante.vigilar: "true"` to your site's containers.
+3. Mount your code (to read `composer.lock`, `package-lock.json`, `pom.xml`…). Mount it read-only
+   if you only want proposals.
+4. Describe in `[[verificacion.servicios]]` how to build and test each service, and in
+   `[aplicacion]` how to deploy and where to check the site.
+5. For maintenance mode, share the `mantenimiento` volume with nginx and add the lines from
+   `ejemplo/web/nginx/default.conf`.
 
-## Demo (todo simulado, accesible desde fuera)
+## Demo
+
+A fully simulated demo (Docker, Claude and Telegram are fake, nothing real is touched):
 
 ```bash
-bash demo/arrancar.sh     # panel en :8090 + túnel cloudflared; imprime URL, usuario y contraseña
-bash demo/parar.sh        # lo para todo
+bash demo/arrancar.sh     # dashboard on :8090 plus a tunnel; prints URL, user and password
+bash demo/parar.sh        # stops everything
 ```
 
-La demo usa Docker, Claude y Telegram **simulados** (los de `pruebas/`), sin claves ni accesos reales.
-El panel pide contraseña (HTTP Basic) porque la URL del túnel es pública. En `/demo` se ve el
-«Telegram» con los botones del bot (aprobar, rechazar, aplicar, revertir) y un botón para reiniciar
-la demo. Si cloudflared no funciona, el script sirve la carpeta del proyecto con
-`python3 -m http.server` en `0.0.0.0:8091`.
+Visit `/demo` to see the simulated Telegram bot with its approve, reject, apply and revert buttons.
 
-## Sin Docker (para probar)
+## Run without Docker
 
 ```bash
 cd vigilante
-python3 -m vigilante -c ../ejemplo/vigilante.toml --detectar   # solo ver qué detecta
-python3 -m vigilante -c mi.toml --una-vez                       # un ciclo (sale con código 2 si hay críticas)
-python3 -m vigilante -c mi.toml                                 # servicio + panel
+python3 -m vigilante -c ../ejemplo/vigilante.toml --detectar   # just show what it detects
+python3 -m vigilante -c my.toml --una-vez                       # one cycle (exit code 2 if critical)
+python3 -m vigilante -c my.toml                                 # service + dashboard
 ```
 
-En `pruebas/docker_falso.py` hay un simulador de la API de Docker para probar la detección
-sin Docker.
+## Tests
+
+```bash
+python3 -m unittest discover -s pruebas    # unit tests
+python3 pruebas/prueba_flujo.py            # full flow with simulated Docker, Claude Code and Telegram
+```
+
+`pruebas/prueba_navegador.py` tests the dashboard in Chromium (needs Playwright).
+
+## Project layout
+
+| Path | Contents |
+|---|---|
+| [`vigilante/`](vigilante/) | The service: detection, sources, dashboard, Claude Code integration |
+| [`ejemplo/`](ejemplo/) | A PHP + nginx site ready for `docker compose` |
+| [`demo/`](demo/) | The simulated demo |
+| [`pruebas/`](pruebas/) | Tests and simulators |
+| [`docs/DISENO.md`](docs/DISENO.md) | Full design document |
+
+> The dashboard, notifications, configuration keys and design document are currently in Spanish.

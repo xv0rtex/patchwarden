@@ -1,18 +1,26 @@
-"""Análisis y propuesta de corrección con Claude (solo si hay ANTHROPIC_API_KEY).
+"""Análisis y propuesta de corrección con Claude a través de Claude Code (suscripción, sin API).
 
-Claude NUNCA aplica nada: devuelve un plan estructurado (JSON validado por la API) con una
-lista de cambios, cada uno con su justificación (qué arregla, por qué es correcto, qué riesgo
+Se ejecuta `claude -p` con tu plan de Claude: el inicio de sesión del propio equipo o, en
+un contenedor, el token de `claude setup-token` (CLAUDE_CODE_OAUTH_TOKEN). Las claves de API se
+retiran siempre del entorno del proceso, porque `claude -p` las preferiría y se cobrarían por uso.
+
+Claude NUNCA aplica nada: se ejecuta sin herramientas de terminal ni de ficheros, en una carpeta
+vacía, y devuelve un plan estructurado (JSON validado con un esquema) con una lista de cambios, cada uno con su justificación (qué arregla, por qué es correcto, qué riesgo
 tiene), su revisión de compatibilidad y cómo revertirlo. El vigilante lo verifica en una
 copia y se lo enseña al usuario, que es quien decide.
 
 Si `investigar_web` está activo, Claude puede consultar changelogs y guías de actualización
-con las herramientas de búsqueda y lectura web del servidor de Anthropic.
+con las herramientas WebSearch y WebFetch de Claude Code.
 """
 from __future__ import annotations
 
 import json
 import logging
 import os
+import shutil
+import subprocess
+import tempfile
+import time
 
 log = logging.getLogger("vigilante.claude")
 
@@ -32,7 +40,8 @@ despliegue del proyecto. Tu trabajo:
 4. Revisar la compatibilidad de cada cambio: incompatibilidades (breaking changes) entre la
    versión actual y la de destino, dependencias que también cambian o lo exigen, y funciones
    deprecadas o eliminadas que el código del proyecto use. Si investigas en la web, usa fuentes
-   primarias (changelog, UPGRADE.md, guía de migración, avisos de seguridad oficiales).
+   primarias (changelog, UPGRADE.md, guía de migración, avisos de seguridad oficiales) y no hagas
+   más de 6 búsquedas y 6 lecturas por análisis.
 
 Reglas de los cambios:
 - `diff`: diff unificado aplicable con `git apply` desde la raíz del proyecto, con rutas
@@ -112,8 +121,51 @@ class ErrorClaude(Exception):
     pass
 
 
+# Solo estas variables llegan a `claude`. Es una lista blanca a propósito: deja fuera
+# ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_USE_BEDROCK… (se facturarían por uso) y
+# los secretos del vigilante (Telegram, panel…), que Claude no necesita. En Linux la sesión
+# va por token o por ~/.claude/.credentials.json (HOME); USER solo hace falta en un Mac de desarrollo,
+# para leer el Llavero.
+ENTORNO_PERMITIDO = ("PATH", "HOME", "USER", "LANG", "LC_ALL", "TMPDIR", "CLAUDE_CONFIG_DIR", "SSL_CERT_FILE",
+                     "NODE_EXTRA_CA_CERTS", "HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+                     "http_proxy", "https_proxy", "no_proxy")
+_sesiones: dict = {}        # binario -> (instante, hay sesión de suscripción)
+
+
+def _binario(cfg: dict):
+    return shutil.which(cfg.get("comando") or "claude")
+
+
+def _token(cfg: dict) -> str:
+    return cfg.get("oauth_token") or os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") or ""
+
+
+def _entorno(cfg: dict) -> dict:
+    env = {k: os.environ[k] for k in ENTORNO_PERMITIDO if k in os.environ}
+    env["DISABLE_AUTOUPDATER"] = "1"
+    if _token(cfg):
+        env["CLAUDE_CODE_OAUTH_TOKEN"] = _token(cfg)
+    return env
+
+
+def _sesion_de_suscripcion(cfg: dict, binario: str) -> bool:
+    """¿Hay sesión de claude.ai? Un inicio de sesión de Console no vale: se cobraría por uso."""
+    previo = _sesiones.get(binario)
+    if previo and time.monotonic() - previo[0] < 60:
+        return previo[1]
+    try:
+        r = subprocess.run([binario, "auth", "status"], env=_entorno(cfg), capture_output=True, text=True, timeout=20)
+        estado = json.loads(r.stdout)
+        valido = bool(estado.get("loggedIn")) and estado.get("authMethod") == "claude.ai"
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        valido = False
+    _sesiones[binario] = (time.monotonic(), valido)
+    return valido
+
+
 def disponible(cfg_claude: dict) -> bool:
-    return bool(cfg_claude.get("api_key") or os.environ.get("ANTHROPIC_API_KEY"))
+    binario = _binario(cfg_claude)
+    return bool(binario and (_token(cfg_claude) or _sesion_de_suscripcion(cfg_claude, binario)))
 
 
 # ------------------------------------------------------------------ contexto
@@ -188,72 +240,72 @@ def construir_peticion(plan: dict, runtimes: dict, capacidades: str) -> str:
 
 
 # ------------------------------------------------------------------ llamada
-def _llamar(cfg: dict, mensajes: list) -> dict:
-    import anthropic
+def _argumentos(cfg: dict, binario: str) -> list:
+    web = cfg.get("investigar_web", True)
+    args = [binario, "-p", "--output-format", "json", "--json-schema", json.dumps(ESQUEMA),
+            "--system-prompt", SISTEMA,
+            "--model", cfg.get("modelo", "claude-opus-5-5"), "--effort", cfg.get("esfuerzo", "high"),
+            "--no-session-persistence", "--setting-sources", "", "--strict-mcp-config",
+            "--disable-slash-commands", "--permission-mode", "dontAsk",
+            # --tools define las ÚNICAS disponibles: sin Bash, Read, Edit ni Agent
+            "--tools", "WebSearch,WebFetch" if web else ""]
+    if web:
+        args += ["--allowedTools", "WebSearch,WebFetch"]
+    return args
 
-    cliente = anthropic.Anthropic(api_key=cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY"))
-    herramientas = []
-    if cfg.get("investigar_web", True):
-        herramientas = [{"type": "web_search_20260209", "name": "web_search", "max_uses": 6},
-                        {"type": "web_fetch_20260209", "name": "web_fetch", "max_uses": 6}]
-    base = dict(model=cfg.get("modelo", "claude-opus-5-5"), max_tokens=64000, system=SISTEMA,
-                thinking={"type": "adaptive"},
-                output_config={"effort": cfg.get("esfuerzo", "high"),
-                               "format": {"type": "json_schema", "schema": ESQUEMA}})
-    if herramientas:
-        base["tools"] = herramientas
-    # Si el modelo rechazara la petición, la API la reintenta sola con el modelo de respaldo.
-    extra = dict(betas=["server-side-fallback-2026-07-01"], fallbacks="default")
 
-    mensajes = list(mensajes)
-    for _ in range(6):                      # pause_turn: el bucle de herramientas del servidor se pausó
+def _error_de(datos: dict) -> ErrorClaude:
+    estado = datos.get("api_error_status")
+    detalle = str(datos.get("result") or datos.get("subtype") or "sin detalle")[:300]
+    if estado == 429 or "limit" in detalle.lower():
+        return ErrorClaude(f"límite de uso de tu plan de Claude alcanzado: {detalle}")
+    if estado in (401, 403) or "log in" in detalle.lower() or "/login" in detalle:
+        return ErrorClaude(f"Claude Code no tiene una sesión válida (revisa el login o el token): {detalle}")
+    return ErrorClaude(f"Claude Code no devolvió un plan: {detalle}")
+
+
+def _llamar(cfg: dict, peticion: str) -> dict:
+    binario = _binario(cfg)
+    if not binario:
+        raise ErrorClaude("no se encuentra el comando de Claude Code")
+    # Carpeta vacía: sin acceso al proyecto ni a un .mcp.json o .claude/ que hubiera en él
+    with tempfile.TemporaryDirectory(prefix="vigilante-claude-") as vacia:
         try:
-            with cliente.beta.messages.stream(**base, **extra, messages=mensajes) as s:
-                resp = s.get_final_message()
-        except anthropic.BadRequestError as e:
-            if extra:                       # por si la cuenta no tiene acceso a la beta de respaldo
-                log.warning("Claude 400 (%s); reintento sin fallbacks", e.message)
-                extra = {}
-                continue
-            raise ErrorClaude(f"petición rechazada: {e.message}") from e
-        except anthropic.RateLimitError as e:
-            raise ErrorClaude("límite de peticiones de la API alcanzado") from e
-        except anthropic.APIStatusError as e:
-            raise ErrorClaude(f"error de la API {e.status_code}: {e.message}") from e
-        except anthropic.APIConnectionError as e:
-            raise ErrorClaude(f"sin conexión con la API: {e}") from e
-        if resp.stop_reason == "pause_turn":
-            mensajes.append({"role": "assistant", "content": resp.content})
-            continue
-        break
-    else:
-        raise ErrorClaude("el análisis no terminó tras varias pausas")
-
-    if resp.stop_reason == "refusal":
-        raise ErrorClaude("el modelo rechazó la petición")
-    if resp.stop_reason == "max_tokens":
-        raise ErrorClaude("respuesta cortada por longitud")
-    texto = "".join(b.text for b in resp.content if b.type == "text").strip()
+            r = subprocess.run(_argumentos(cfg, binario), input=peticion, env=_entorno(cfg), cwd=vacia,
+                               capture_output=True, text=True, timeout=int(cfg.get("timeout_s", 1800)))
+        except subprocess.TimeoutExpired as e:
+            raise ErrorClaude(f"Claude Code no terminó en {e.timeout} s") from e
+        except OSError as e:
+            raise ErrorClaude(f"no se pudo ejecutar Claude Code: {e}") from e
     try:
-        return json.loads(texto)
+        datos = json.loads(r.stdout)
     except ValueError as e:
-        raise ErrorClaude("la respuesta no es un JSON válido") from e
+        raise ErrorClaude(f"Claude Code falló (código {r.returncode}): {r.stderr.strip()[:300]}") from e
+    if not isinstance(datos, dict):
+        raise ErrorClaude("Claude Code devolvió una respuesta inesperada")
+    plan = datos.get("structured_output")
+    if r.returncode != 0 or datos.get("is_error") or not isinstance(plan, dict):
+        raise _error_de(datos)
+    return plan
 
 
 def analizar(cfg: dict, plan: dict, runtimes: dict, capacidades: str) -> dict:
-    return _llamar(cfg, [{"role": "user", "content": construir_peticion(plan, runtimes, capacidades)}])
+    return _llamar(cfg, construir_peticion(plan, runtimes, capacidades))
 
 
 def corregir(cfg: dict, plan: dict, runtimes: dict, capacidades: str, fallo: str) -> dict:
     """Segunda oportunidad: se le enseña su plan y por qué falló la verificación."""
     previo = {k: plan["analisis"][k] for k in ("version_objetivo", "estrategia")}
     previo["cambios"] = plan["cambios_originales"]
-    return _llamar(cfg, [
-        {"role": "user", "content": construir_peticion(plan, runtimes, capacidades)},
-        {"role": "assistant", "content": json.dumps(previo, ensure_ascii=False)},
-        {"role": "user", "content": "La verificación automática de ese plan en una copia del proyecto ha FALLADO:\n"
-                                    f"<resultado_verificacion>\n{fallo[:12000]}\n</resultado_verificacion>\n"
-                                    "Analiza la causa y devuelve el plan completo corregido con el mismo formato. "
-                                    "Si no se puede corregir sin riesgo, propón la alternativa más segura "
-                                    "(p. ej. otra versión o una mitigación temporal) y explícalo."},
-    ])
+    return _llamar(cfg, f"""{construir_peticion(plan, runtimes, capacidades)}
+
+## Tu plan anterior
+<plan_anterior>
+{json.dumps(previo, ensure_ascii=False)}
+</plan_anterior>
+
+La verificación automática de ese plan en una copia del proyecto ha FALLADO:
+<resultado_verificacion>
+{fallo[:12000]}
+</resultado_verificacion>
+Analiza la causa y devuelve el plan completo corregido con el mismo formato. Si no se puede corregir sin riesgo, propón la alternativa más segura (p. ej. otra versión o una mitigación temporal) y explícalo.""")

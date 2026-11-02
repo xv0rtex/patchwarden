@@ -19,6 +19,7 @@ import time
 import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from . import claude
 from . import vista as V
 from .modelo import ORDEN_SEVERIDAD
 from .planes import aprobados, pendientes
@@ -151,8 +152,8 @@ class Panel:
     def _form_resolver(self, campos: str, texto: str, etiqueta: str, tamano_pequeno=True) -> str:
         """Formulario con ventana de confirmación: el usuario inicia EXPLÍCITAMENTE la resolución con Claude."""
         pequeno = 'style="padding:6px 11px"' if tamano_pequeno else ""
-        aviso = (" Se enviarán a la API de Anthropic las vulnerabilidades y los ficheros de despliegue del "
-                 "proyecto (nunca los .env ni los datos de la app), y consume uso de la API. Claude solo "
+        aviso = (" Se enviarán a Anthropic, a través de Claude Code, las vulnerabilidades y los ficheros de despliegue del "
+                 "proyecto (nunca los .env ni los datos de la app), y consume uso de tu plan de Claude. Claude solo "
                  "propone: no se modificará nada hasta que apruebes cada cambio.")
         return (f'<form method="post" action="/api/claude/resolver" data-confirmar="{E(texto + aviso, quote=True)}" '
                 f'data-titulo="Resolver con Claude" data-boton="Sí, resolver con Claude">{campos}'
@@ -390,8 +391,8 @@ placeholder="Buscar CVE, componente o texto"></label>{chips}
         historial = [p for p in planes if p not in activos]
         if not planes:
             ayuda = ("Todavía no has pedido ninguna corrección. Claude no hace nada por su cuenta: ve a Componentes y "
-                     "pulsa «Resolver con Claude» en el que quieras arreglar." if self.v.cfg["claude"].get("api_key")
-                     else "Configura ANTHROPIC_API_KEY para poder pedirle correcciones a Claude.")
+                     "pulsa «Resolver con Claude» en el que quieras arreglar." if claude.disponible(self.v.cfg["claude"])
+                     else "Inicia sesión en Claude Code o configura CLAUDE_CODE_OAUTH_TOKEN (claude setup-token) para poder pedirle correcciones a Claude.")
             cuerpo = V.tarjeta(V.vacio(ayuda, "llave") + '<div style="text-align:center">'
                                + V.boton("Ir a Componentes", "secundario", "flecha", href="/componentes") + "</div>")
         else:
