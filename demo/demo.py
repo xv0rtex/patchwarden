@@ -167,7 +167,7 @@ def main():
     cfg["mantenimiento"].update(carpeta=os.path.join(TMP, "mant"))
     cfg["panel"].update(host="127.0.0.1", puerto=PUERTO, usuario=os.environ.get("DEMO_USUARIO", "demo"),
                         clave=clave, token="", url_publica=os.environ.get("DEMO_URL", ""),
-                        banner="<b>DEMO</b> Docker, Claude y Telegram simulados: no se toca nada real. Claude solo actúa cuando pulsas «Resolver con Claude» · "
+                        banner="<b>DEMO</b> Docker, Claude y Telegram simulados: no se toca nada real. Claude solo actúa cuando pulsas «Corregir con Claude» · "
                                "<a href='/demo'>Ver el Telegram simulado con los botones</a>",
                         nav_extra=[("/demo", "Telegram (simulado)", "chat")])
 

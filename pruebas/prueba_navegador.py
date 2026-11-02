@@ -19,45 +19,45 @@ with sync_playwright() as p:
     pg.on("pageerror", lambda e: err.append(str(e)))
     # Claude NO trabaja solo: hay que pedirlo. Se pide php (cancelando primero) y twig desde Componentes
     pg.goto(B+"/correcciones")
-    ok(pg.locator(".item").count() == 0, "al empezar no hay ninguna corrección: Claude no ha hecho nada solo")
+    ok(pg.locator("#t-planes-activos tbody tr").count() == 0, "al empezar no hay ninguna corrección: Claude no ha hecho nada solo")
     pg.goto(B+"/componentes?app=ejemplo")
     fila_php = pg.locator("tbody tr", has=pg.locator("td:first-child b", has_text=re.compile(r"^php$")))
-    fila_php.get_by_role("button", name="Resolver con Claude").click()
+    fila_php.get_by_role("button", name="Corregir con Claude").click()
     texto_dialogo = pg.inner_text("#dlg-m")
     ok(pg.is_visible("dialog#dlg") and "Anthropic" in texto_dialogo and ".env" in texto_dialogo,
        "el diálogo explica qué se envía a Anthropic")
     pg.click("dialog button[value=no]"); time.sleep(.5)
-    pg.goto(B+"/correcciones"); ok(pg.locator(".item").count() == 0, "cancelar el diálogo no pide nada a Claude")
+    pg.goto(B+"/correcciones"); ok(pg.locator("#t-planes-activos tbody tr").count() == 0, "cancelar el diálogo no pide nada a Claude")
     for nombre in ("php", "twig/twig"):
         pg.goto(B+"/componentes?app=ejemplo")
         fila = pg.locator("tbody tr", has=pg.locator("td:first-child b", has_text=re.compile("^" + re.escape(nombre) + "$")))
-        fila.get_by_role("button", name="Resolver con Claude").click()
+        fila.get_by_role("button", name="Corregir con Claude").click()
         with pg.expect_navigation(): pg.click("#dlg-ok")
     for _ in range(40):
         pg.goto(B+"/correcciones")
-        if pg.locator(".item", has_text="Esperando tu decisión").count() == 2: break
+        if pg.locator("#t-planes-activos tbody tr", has_text="Esperando tu decisión").count() == 2: break
         time.sleep(1)
-    ok(pg.locator(".item", has_text="Esperando tu decisión").count() == 2, "tras confirmar aparecen los 2 planes pedidos, esperando decisión")
+    ok(pg.locator("#t-planes-activos tbody tr", has_text="Esperando tu decisión").count() == 2, "tras confirmar aparecen los 2 planes pedidos, esperando decisión")
     pg.goto(B+"/componentes?app=")   # vuelve a «todas las apps»
 
     # desplegable de apps (la demo trae varias): filtra todas las páginas y recuerda la elección
     pg.goto(B+"/")
     opciones = pg.eval_on_selector_all("#sel-app option", "os=>os.map(o=>o.value)")
     ok(len(opciones) >= 3 and opciones[0] == "", f"desplegable con todas las apps: {opciones}")
-    ok(pg.locator(".app-card").count() == len(opciones) - 1, "tarjetas de apps en el resumen")
-    total = int(pg.inner_text(".kpi-v").strip())
+    ok(pg.locator("#t-webs tbody tr").count() == len(opciones) - 1, "tabla de webs en el resumen")
+    total = int(pg.inner_text(".kpi[data-k=vulns] .kpi-v").strip())
     app = next(o for o in opciones if o and o != "ejemplo")
     with pg.expect_navigation(): pg.select_option("#sel-app", app)
-    filtrado = int(pg.inner_text(".kpi-v").strip())
+    filtrado = int(pg.inner_text(".kpi[data-k=vulns] .kpi-v").strip())
     ok(filtrado < total, f"al elegir «{app}» solo se cuentan sus vulnerabilidades ({filtrado} de {total})")
-    ok(pg.locator(".app-card").count() == 0, "con una app elegida desaparece el listado de apps")
+    ok(pg.locator("#t-webs").count() == 0, "con una app elegida desaparece la tabla de webs")
     pg.goto(B+"/componentes")
     nombres = pg.eval_on_selector_all("table tbody tr td:first-child b", "bs=>bs.map(b=>b.textContent)")
     ok(nombres and "nginx" not in nombres, f"Componentes solo muestra los de {app}: {nombres}")
     ok(pg.eval_on_selector("#sel-app", "s=>s.value") == app, "la elección se recuerda al cambiar de página")
     with pg.expect_navigation(): pg.select_option("#sel-app", "")
     pg.goto(B+"/")
-    ok(int(pg.inner_text(".kpi-v").strip()) == total, "«Todas las apps» vuelve a mostrar todo")
+    ok(int(pg.inner_text(".kpi[data-k=vulns] .kpi-v").strip()) == total, "«Todas las apps» vuelve a mostrar todo")
     pg.screenshot(path="/tmp/caps/i-apps.png", full_page=True)
     # vulnerabilidades: filtros y paginación
     pg.goto(B+"/vulnerabilidades")
